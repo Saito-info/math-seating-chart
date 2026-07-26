@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive } from '@/types';
-import { parseExcelData } from '@/lib/excel-parser';
+import { parseExcelData, ImportMode } from '@/lib/excel-parser';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
@@ -27,11 +27,13 @@ export default function TabStudents({
   archives,
   onDeleteArchive,
 }: Props) {
-  // ★ サブタブに「archive」を新設！
   const [subTab, setSubTab] = useState<'list' | 'layout' | 'archive'>('list');
   const [showScores, setShowScores] = useState<boolean>(false);
   const [openStudentId, setOpenStudentId] = useState<number | null>(null);
   const [selectedArchive, setSelectedArchive] = useState<SeatingArchive | null>(null);
+
+  // ★ ご指示通り「新形式＝座席希望」「旧形式＝成績入力」の切り替えモードを新設！
+  const [importMode, setImportMode] = useState<ImportMode>('seat-pref');
 
   const maxNum = getMaxStudents(currentClass);
 
@@ -56,21 +58,20 @@ export default function TabStudents({
     disabledSeatIndices: [],
   };
 
-  // ★ ご指示通り、選択中のクラス(currentClass)が含まれる履歴をすべて抽出！（1,2組合同ならどちらでも表示）
   const relevantArchives = archives.filter(a => a.targetClasses.includes(currentClass));
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const parsed = await parseExcelData(file, currentClass);
-      const importedClassIds = Array.from(new Set(parsed.map(s => s.classId)));
-      const untouchedStudents = students.filter(s => !importedClassIds.includes(s.classId));
+      // ★ 既存の生徒配列(students)とモード(importMode)を渡し、両方のデータを消さずにスマート統合！
+      const mergedStudents = await parseExcelData(file, currentClass, importMode, students);
+      onUpdateStudents(mergedStudents);
       
-      onUpdateStudents([...untouchedStudents, ...parsed]);
-      alert(`Excelから [ ${importedClassIds.join(', ')} ] の全情報を一括インポートし、保存しました！`);
+      const modeLabel = importMode === 'seat-pref' ? '座席希望（新形式・G列/K列）' : '成績スコア（旧形式・各クラス列）';
+      alert(`Excelファイルから『 ${modeLabel} 』をインポートし、既存データと統合・保存しました！`);
     } catch (err) {
-      alert('Excelの読み込みに失敗しました。');
+      alert('Excelの読み込みに失敗しました。ファイルの形式を確認してください。');
     }
   };
 
@@ -132,7 +133,6 @@ export default function TabStudents({
             </label>
           )}
 
-          {/* ★ 3つのサブタブボタン */}
           <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs font-extrabold flex-wrap">
             <button
               type="button"
@@ -166,15 +166,40 @@ export default function TabStudents({
 
       {subTab === 'list' ? (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
-          <div className="flex justify-between items-center border-b pb-4">
+          <div className="flex flex-col xl:flex-row justify-between xl:items-center border-b pb-4 gap-4">
             <div>
               <h3 className="font-extrabold text-lg text-slate-800">{currentClass} 全員分データ ({allStudentsList.length}名表示)</h3>
               <p className="text-xs text-slate-500 mt-0.5">※生徒行をクリックするとその場で配慮事項や希望区分をアコーディオン編集できます。</p>
             </div>
-            <label className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-4 py-2 rounded-xl text-xs cursor-pointer shadow transition flex items-center gap-1.5">
-              <span>📂 現行Excelをインポート</span>
-              <input type="file" accept=".xlsx,.xlsm,.xls" onChange={handleFileUpload} className="hidden" />
-            </label>
+
+            {/* ★ 形式切替スイッチ ＆ インポート実行ボタン */}
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs font-black">
+                <button
+                  type="button"
+                  onClick={() => setImportMode('seat-pref')}
+                  className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1 ${
+                    importMode === 'seat-pref' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <span>✨ 新形式 (座席希望)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportMode('score')}
+                  className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1 ${
+                    importMode === 'score' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <span>📊 旧形式 (成績入力)</span>
+                </button>
+              </div>
+
+              <label className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-4 py-2 rounded-xl text-xs cursor-pointer shadow transition flex items-center gap-1.5 shrink-0">
+                <span>📂 {importMode === 'seat-pref' ? '新形式で希望をインポート' : '旧形式で成績をインポート'}</span>
+                <input type="file" accept=".xlsx,.xlsm,.xls" onChange={handleFileUpload} className="hidden" />
+              </label>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -391,9 +416,6 @@ export default function TabStudents({
           </div>
         </div>
       ) : (
-        /* ==========================================
-           ★ サブタブ3: 「📂 アーカイブ履歴」タブ ＆ プレビュー画面
-           ========================================== */
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="border-b pb-4">
             <h3 className="font-extrabold text-lg text-slate-800">{currentClass} 関連のアーカイブ保存履歴</h3>
@@ -401,7 +423,6 @@ export default function TabStudents({
           </div>
 
           {selectedArchive ? (
-            /* 選択した履歴の詳細座席プレビュー */
             <div className="space-y-4 bg-slate-50 p-5 rounded-2xl border border-slate-300 animate-fade-in">
               <div className="flex justify-between items-center border-b border-slate-200 pb-3 flex-wrap gap-2">
                 <div>
@@ -416,7 +437,6 @@ export default function TabStudents({
                 </button>
               </div>
 
-              {/* 適用されていた座席関数 */}
               <div className="p-4 bg-slate-900 text-white rounded-xl text-center">
                 <span className="text-[10px] font-black text-indigo-400 block mb-1">その時に使われた座席関数</span>
                 <div className="font-mono text-sm sm:text-base overflow-x-auto">
@@ -424,7 +444,6 @@ export default function TabStudents({
                 </div>
               </div>
 
-              {/* 当時の座席グリッド */}
               <div className="p-4 bg-white rounded-xl border border-slate-200 overflow-x-auto">
                 <div
                   className="grid gap-2 mx-auto"
@@ -462,7 +481,6 @@ export default function TabStudents({
               </div>
             </div>
           ) : (
-            /* 履歴カード一覧リスト */
             <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
               {relevantArchives.length === 0 ? (
                 <div className="p-12 text-center text-slate-400 font-bold bg-slate-50 rounded-xl border border-dashed border-slate-300">
