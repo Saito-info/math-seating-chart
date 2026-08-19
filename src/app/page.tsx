@@ -103,7 +103,6 @@ export default function Home() {
     setActiveTab('editor');
   };
 
-  // ★ 座席表の保存処理（アーカイブ履歴へ永続保存）
   const handleSaveArchive = () => {
     const title = isCombinedMode
       ? `${targetClassesList.join('・')} 合同座席表 (${new Date().toLocaleDateString('ja-JP')})`
@@ -126,7 +125,6 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900 pb-16">
-      {/* ★ ご指示通り、タイトルを「数学 席替え座席表」へ変更！ */}
       <header className="bg-slate-900 text-white py-5 px-8 shadow-md flex justify-between items-center">
         <div>
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight">数学 席替え座席表</h1>
@@ -136,7 +134,8 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto px-4 mt-8">
+      {/* ★ ここが超拡張ポイント！ 横幅を最大1600px・画面幅の95%まで広げました */}
+      <div className="max-w-[95%] 2xl:max-w-[1600px] mx-auto px-4 mt-8">
         <div className="flex border-b border-slate-300 gap-2 font-extrabold text-base">
           <button
             onClick={() => setActiveTab('students')}
@@ -173,7 +172,7 @@ export default function Home() {
               onChangeClass={setCurrentClass}
               layouts={layouts}
               onUpdateLayouts={setLayouts}
-              archives={archives} // ★ アーカイブ履歴データを引き渡し
+              archives={archives}
               onDeleteArchive={(id) => setArchives(prev => prev.filter(a => a.id !== id))}
             />
           )}
@@ -192,9 +191,9 @@ export default function Home() {
               students={students}
               cols={cols}
               seatingFunc={currentFunc}
-              isCombined={isCombinedMode} // ★ 合同授業フラグ（デフォルト85%設定用）
+              isCombined={isCombinedMode}
               onUpdateSeats={setSeats}
-              onSaveArchive={handleSaveArchive} // ★ アーカイブ保存コールバック
+              onSaveArchive={handleSaveArchive}
             />
           )}
         </div>

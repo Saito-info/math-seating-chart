@@ -27,14 +27,16 @@ export default function TabEditor({
   const [showAnswer, setShowAnswer] = useState<boolean>(false);
   const [selectedSeatIndex, setSelectedSeatIndex] = useState<number | null>(null);
   
-  // ★ ご指示通り、合同授業時は両方 85% をデフォルトに初期化！通常時は 100%
   const [fontSizeScale, setFontSizeScale] = useState<number>(isCombined ? 85 : 100);
   const [zoomScale, setZoomScale] = useState<number>(isCombined ? 85 : 100);
+  
+  // ★ プロジェクター投影用：数式の大きさを自由に変えられるスケーラー！（デフォルト100%）
+  const [mathSizeScale, setMathSizeScale] = useState<number>(100);
 
-  // 合同かどうかの切り替えが起きたときに初期値を自動追従
   useEffect(() => {
     setFontSizeScale(isCombined ? 85 : 100);
     setZoomScale(isCombined ? 85 : 100);
+    setMathSizeScale(100); // 新しく生成した時は数式サイズもリセット
   }, [isCombined]);
 
   const handleSeatClick = (clickedIndex: number) => {
@@ -102,9 +104,9 @@ export default function TabEditor({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      
+      {/* 左側カラム（8/12）：座席表グリッド */}
       <div className="lg:col-span-8 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden">
-        
-        {/* レジェンド ＆ ★ 5%刻みダブルコントローラー */}
         <div className="flex flex-col xl:flex-row items-center justify-between gap-3 bg-slate-50 py-3 px-4 rounded-xl border border-slate-200">
           <div className="flex items-center gap-4 text-xs font-extrabold flex-wrap">
             <div className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-sky-100 border-2 border-sky-400"></span><span>① 個人・集中(青)</span></div>
@@ -113,7 +115,6 @@ export default function TabEditor({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* ★ 🔍 教室全体ズーム (5%刻み！) */}
             <div className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-lg border border-slate-300 shadow-2xs">
               <span className="text-xs font-black text-slate-600">🔍 ズーム:</span>
               <button
@@ -135,7 +136,6 @@ export default function TabEditor({
               </button>
             </div>
 
-            {/* ★ 🔤 文字サイズ調整 (5%刻み！) */}
             <div className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-lg border border-slate-300 shadow-2xs">
               <span className="text-xs font-black text-slate-600">🔤 文字:</span>
               <button
@@ -239,6 +239,7 @@ export default function TabEditor({
         </div>
       </div>
 
+      {/* 右側カラム（4/12）：座席関数 ＆ コントローラー */}
       <div className="lg:col-span-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
         <div className="border-b pb-3">
           <h3 className="font-extrabold text-lg text-slate-800">座席表コントロール</h3>
@@ -262,13 +263,40 @@ export default function TabEditor({
             )}
           </button>
 
-          {/* ★ ご指示通り、スクロールなしで大きく見せる2段改行対応の数式ボックス！ */}
-          <div className="p-5 bg-slate-900 text-white rounded-2xl shadow-inner text-center space-y-2">
-            <div className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">
-              現在適用中の座席関数
+          {/* ★ 数式の大きさを自在に変えられる特大表示パネル！ */}
+          <div className="p-4 sm:p-5 bg-slate-900 text-white rounded-2xl shadow-inner text-center space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">
+                現在適用中の座席関数
+              </span>
+              <div className="flex items-center gap-1.5 bg-slate-800 px-2 py-0.5 rounded-lg border border-slate-700 shadow-sm">
+                <span className="text-[10px] font-black text-slate-400">🧮 大きさ:</span>
+                <button
+                  type="button"
+                  onClick={() => setMathSizeScale(prev => Math.max(prev - 10, 50))}
+                  className="w-5 h-5 bg-slate-700 hover:bg-slate-600 text-white font-black rounded flex items-center justify-center text-xs transition cursor-pointer"
+                >
+                  －
+                </button>
+                <span className="font-mono font-black text-[10px] text-indigo-300 w-8 text-center">
+                  {mathSizeScale}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMathSizeScale(prev => Math.min(prev + 10, 400))}
+                  className="w-5 h-5 bg-slate-700 hover:bg-slate-600 text-white font-black rounded flex items-center justify-center text-xs transition cursor-pointer"
+                >
+                  ＋
+                </button>
+              </div>
             </div>
+
             {seatingFunc ? (
-              <div className="font-mono text-base sm:text-lg py-2 overflow-hidden w-full flex justify-center">
+              <div
+                className="font-mono overflow-x-auto py-2 flex justify-center transition-all duration-150"
+                /* 1.125rem (text-lg相当) を基準にスケール */
+                style={{ fontSize: `${1.125 * (mathSizeScale / 100)}rem` }}
+              >
                 <BlockMath math={seatingFunc.latexString} />
               </div>
             ) : (
