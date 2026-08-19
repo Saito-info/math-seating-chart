@@ -1,6 +1,6 @@
 import { Student, SeatNode, ClassLayoutTemplate, SeatingFunction } from '@/types';
 
-/** ①（集中・青）生徒の配置順序（後方から連続スキャン） */
+/** ①（個人・集中・青）生徒の配置順序 */
 function getFocusContinuousOrder(rows: number, cols: number, isCombined: boolean): { r: number; c: number }[] {
   const order: { r: number; c: number }[] = [];
   if (!isCombined) {
@@ -396,7 +396,7 @@ export function generateOptimizedSeatingChart(
 
   // ==========================================
   // ★ ステップ1: ②（グループ）を辞書にはめ込み ＆ 「🤝 同グループペア希望」の最優先割り当て！
-  // 双方向リンクにより、確実に相手を同じ島に引き込みます。
+  // ★ リーダー選抜時にペア分断を防止し、メンバー割り当て時に同じ島へ確実に連鎖引き込み！
   // ==========================================
   const groupPatterns = getScaledGroupPatterns(remainingGroupStudents.length, isCombined);
   
@@ -405,13 +405,34 @@ export function generateOptimizedSeatingChart(
   const leaderPool = sortedGroupStudents.slice(0, leaderPoolSize);
   const shuffledPool = [...leaderPool].sort(() => Math.random() - 0.5);
   
-  const leaders = shuffledPool.slice(0, groupPatterns.length);
+  // リーダー選抜：互いにペア関係にある生徒は、片方だけをリーダーにしてもう片方はメンバーに回す（分断防止）
+  const leaders: Student[] = [];
+  for (const stu of shuffledPool) {
+    if (leaders.length < groupPatterns.length) {
+      const hasPairInLeaders = leaders.some(l => 
+        (l.classId === stu.classId && stu.props.common.customPairs?.includes(l.id)) ||
+        (stu.classId === l.classId && l.props.common.customPairs?.includes(stu.id))
+      );
+      if (!hasPairInLeaders) {
+        leaders.push(stu);
+      }
+    }
+  }
+  // 足りなければペア被りを無視して補充
+  if (leaders.length < groupPatterns.length) {
+    const unselected = remainingGroupStudents.filter(s => !leaders.includes(s));
+    for (const stu of unselected) {
+      if (leaders.length < groupPatterns.length) {
+        if (!leaders.includes(stu)) leaders.push(stu);
+      } else break;
+    }
+  }
+
   const members = remainingGroupStudents.filter(s => !leaders.includes(s));
 
-  for (let i = 0; i < groupPatterns.length; i++) {
-    const pat = groupPatterns[i];
+  // 各グループ枠の準備
+  const groupsData = groupPatterns.map(pat => {
     const targetSeats: SeatNode[] = [];
-
     for (const coord of pat.coords) {
       if (coord.r <= rows && coord.c <= cols) {
         const s = grid[coord.r - 1][coord.c - 1];
@@ -420,42 +441,73 @@ export function generateOptimizedSeatingChart(
         }
       }
     }
+    return { pat, targetSeats, assigned: [] as Student[] };
+  });
 
-    if (targetSeats.length > 0) {
-      targetSeats.forEach(s => s.groupId = pat.id);
+  // 各グループにリーダーを1人ずつ配置
+  for (let i = 0; i < groupsData.length; i++) {
+    if (leaders[i]) {
+      groupsData[i].assigned.push(leaders[i]);
+    }
+  }
 
-      if (leaders[i] && targetSeats[0]) {
-        targetSeats[0].studentId = leaders[i].id;
-        targetSeats[0].studentClassId = leaders[i].classId;
-        targetSeats[0].role = 'leader';
+  // リーダーのペアをメンバーから探して同じ島（グループ）に優先的に詰め込む（連鎖引き込み）
+  for (let i = 0; i < groupsData.length; i++) {
+    const g = groupsData[i];
+    const capacity = g.targetSeats.length;
+    let added = true;
+    while (added && g.assigned.length < capacity) {
+      added = false;
+      for (const currStu of g.assigned) {
+        if (currStu.props.common.customPairs) {
+          for (const pairId of currStu.props.common.customPairs) {
+            const mIdx = members.findIndex(m => m.classId === currStu.classId && m.id === pairId);
+            if (mIdx !== -1 && g.assigned.length < capacity) {
+              g.assigned.push(members.splice(mIdx, 1)[0]);
+              added = true;
+            }
+          }
+        }
       }
+    }
+  }
 
-      for (let j = 1; j < targetSeats.length; j++) {
-        if (members.length > 0) {
-          let memberToAssign: Student | undefined = undefined;
-
-          // すでにこの島に入っている生徒のペア希望を双方向でチェック！
-          const currentGroupStudents = targetSeats.slice(0, j)
-            .map(s => activeStudents.find(st => st.classId === s.studentClassId && st.id === s.studentId))
-            .filter(Boolean) as Student[];
-
-          for (const currStu of currentGroupStudents) {
-            if (currStu.props.common.customPairs && currStu.props.common.customPairs.length > 0) {
-              const pairIdx = members.findIndex(m => currStu.props.common.customPairs?.includes(m.id) && m.classId === currStu.classId);
-              if (pairIdx !== -1) {
-                memberToAssign = members.splice(pairIdx, 1)[0];
-                break;
+  // 残りのメンバーを配置。その際もペアを見つけたら一緒に島へ連れてくる
+  for (let i = 0; i < groupsData.length; i++) {
+    const g = groupsData[i];
+    const capacity = g.targetSeats.length;
+    while (g.assigned.length < capacity && members.length > 0) {
+      const member = members.shift()!;
+      g.assigned.push(member);
+      
+      let added = true;
+      while (added && g.assigned.length < capacity) {
+        added = false;
+        for (const currStu of g.assigned) {
+          if (currStu.props.common.customPairs) {
+            for (const pairId of currStu.props.common.customPairs) {
+              const mIdx = members.findIndex(m => m.classId === currStu.classId && m.id === pairId);
+              if (mIdx !== -1 && g.assigned.length < capacity) {
+                g.assigned.push(members.splice(mIdx, 1)[0]);
+                added = true;
               }
             }
           }
+        }
+      }
+    }
+  }
 
-          if (!memberToAssign) {
-            memberToAssign = members.shift()!;
-          }
-
-          targetSeats[j].studentId = memberToAssign.id;
-          targetSeats[j].studentClassId = memberToAssign.classId;
-          targetSeats[j].role = 'member';
+  // グループのSeatNodeに実際のデータを割り当て
+  for (let i = 0; i < groupsData.length; i++) {
+    const g = groupsData[i];
+    if (g.targetSeats.length > 0) {
+      g.targetSeats.forEach(s => s.groupId = g.pat.id);
+      for (let j = 0; j < g.assigned.length; j++) {
+        if (g.targetSeats[j]) {
+          g.targetSeats[j].studentId = g.assigned[j].id;
+          g.targetSeats[j].studentClassId = g.assigned[j].classId;
+          g.targetSeats[j].role = j === 0 && leaders.includes(g.assigned[j]) ? 'leader' : 'member';
         }
       }
     }
@@ -524,11 +576,10 @@ export function generateOptimizedSeatingChart(
     }
   }
 
-  // 【ステップ2-2】: ①同士のペア（残りの①を配置しながら、ペアなら強制的に隣の空き席に置く！）
+  // 【ステップ2-2】: ①同士のペア（残りの①を配置しながら、ペアなら強制的に物理的な隣の空き席に置く！）
   for (const stu of orderedFocusStudents) {
     if (grid.flat().some(s => s.studentClassId === stu.classId && s.studentId === stu.id)) continue;
 
-    // 次に優先順位が高い空き席を探す
     const seat = emptySeatsForFocus.find(s => s.studentId === null);
     if (!seat) break;
 
