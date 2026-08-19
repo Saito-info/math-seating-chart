@@ -124,8 +124,8 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-50 text-slate-900 pb-16">
-      <header className="bg-slate-900 text-white py-5 px-8 shadow-md flex justify-between items-center">
+    <main className="min-h-screen bg-slate-50 text-slate-900 pb-16 overflow-x-hidden">
+      <header className="bg-slate-900 text-white py-5 px-4 sm:px-8 shadow-md flex flex-wrap justify-between items-center gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight">数学 席替え座席表</h1>
         </div>
@@ -134,12 +134,12 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ★ ここが超拡張ポイント！ 横幅を最大1600px・画面幅の95%まで広げました */}
-      <div className="max-w-[95%] 2xl:max-w-[1600px] mx-auto px-4 mt-8">
-        <div className="flex border-b border-slate-300 gap-2 font-extrabold text-base">
+      {/* ★ ここが究極の拡張ポイント！ max-w-none にして画面幅100%フルサイズ対応にしました */}
+      <div className="w-full max-w-none px-2 sm:px-6 lg:px-8 mx-auto mt-6">
+        <div className="flex border-b border-slate-300 gap-1 sm:gap-2 font-extrabold text-sm sm:text-base overflow-x-auto">
           <button
             onClick={() => setActiveTab('students')}
-            className={`py-3 px-6 border-b-2 transition cursor-pointer ${
+            className={`py-3 px-4 sm:px-6 border-b-2 transition cursor-pointer whitespace-nowrap ${
               activeTab === 'students' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-xl shadow-sm' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
@@ -147,7 +147,7 @@ export default function Home() {
           </button>
           <button
             onClick={() => setActiveTab('formula')}
-            className={`py-3 px-6 border-b-2 transition cursor-pointer ${
+            className={`py-3 px-4 sm:px-6 border-b-2 transition cursor-pointer whitespace-nowrap ${
               activeTab === 'formula' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-xl shadow-sm' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
@@ -155,7 +155,7 @@ export default function Home() {
           </button>
           <button
             onClick={() => setActiveTab('editor')}
-            className={`py-3 px-6 border-b-2 transition cursor-pointer ${
+            className={`py-3 px-4 sm:px-6 border-b-2 transition cursor-pointer whitespace-nowrap ${
               activeTab === 'editor' ? 'border-indigo-600 text-indigo-600 bg-white rounded-t-xl shadow-sm' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >

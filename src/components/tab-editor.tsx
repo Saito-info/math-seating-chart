@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { SeatNode, Student, SeatingFunction } from '@/types';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
@@ -29,14 +29,16 @@ export default function TabEditor({
   
   const [fontSizeScale, setFontSizeScale] = useState<number>(isCombined ? 85 : 100);
   const [zoomScale, setZoomScale] = useState<number>(isCombined ? 85 : 100);
-  
-  // ★ プロジェクター投影用：数式の大きさを自由に変えられるスケーラー！（デフォルト100%）
   const [mathSizeScale, setMathSizeScale] = useState<number>(100);
+
+  // ★ 左右ペインのリサイズ機能（左側座席表の幅割合 ％）
+  const [leftPaneWidth, setLeftPaneWidth] = useState<number>(66);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setFontSizeScale(isCombined ? 85 : 100);
     setZoomScale(isCombined ? 85 : 100);
-    setMathSizeScale(100); // 新しく生成した時は数式サイズもリセット
+    setMathSizeScale(100);
   }, [isCombined]);
 
   const handleSeatClick = (clickedIndex: number) => {
@@ -73,9 +75,35 @@ export default function TabEditor({
     }
   };
 
+  // ★ リサイザー（幅調整）のドラッグ処理
+  const handleResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    document.addEventListener('mousemove', handleResizeMouseMove);
+    document.addEventListener('mouseup', handleResizeMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none'; // ドラッグ中のテキスト青反転を防止
+  };
+
+  const handleResizeMouseMove = (e: MouseEvent) => {
+    if (!containerRef.current) return;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const newLeftWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+    
+    // 左カラムは最小30%、最大85%までリサイズ可能
+    if (newLeftWidth >= 30 && newLeftWidth <= 85) {
+      setLeftPaneWidth(newLeftWidth);
+    }
+  };
+
+  const handleResizeMouseUp = () => {
+    document.removeEventListener('mousemove', handleResizeMouseMove);
+    document.removeEventListener('mouseup', handleResizeMouseUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+
   const getGroupBorderStyles = (seat: SeatNode) => {
     if (!seat.groupId) return 'border-2 border-slate-300';
-
     const r = seat.row;
     const c = seat.col;
     const sameTop = seats.find(s => s.row === r - 1 && s.col === c && s.groupId === seat.groupId);
@@ -103,18 +131,24 @@ export default function TabEditor({
   const cellMinPx = Math.round(85 * (zoomScale / 100));
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+    // ★ CSS変数 `--left-width` でリサイズ幅をリアルタイム適用！
+    <div 
+      className="flex flex-col lg:flex-row items-stretch w-full gap-4 lg:gap-0"
+      ref={containerRef}
+      style={{ '--left-width': `${leftPaneWidth}%` } as React.CSSProperties}
+    >
       
-      {/* 左側カラム（8/12）：座席表グリッド */}
-      <div className="lg:col-span-8 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden">
-        <div className="flex flex-col xl:flex-row items-center justify-between gap-3 bg-slate-50 py-3 px-4 rounded-xl border border-slate-200">
-          <div className="flex items-center gap-4 text-xs font-extrabold flex-wrap">
+      {/* 左側カラム：座席表グリッド */}
+      <div className="w-full lg:w-[var(--left-width)] bg-white p-4 sm:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden shrink-0">
+        
+        <div className="flex flex-col xl:flex-row items-center justify-between gap-3 bg-slate-50 py-3 px-4 rounded-xl border border-slate-200 overflow-x-auto">
+          <div className="flex items-center gap-4 text-xs font-extrabold flex-wrap shrink-0">
             <div className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-sky-100 border-2 border-sky-400"></span><span>① 個人・集中(青)</span></div>
-            <div className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-white border-2 border-slate-900"></span><span>② グループ(白・鍵かっこ太枠)</span></div>
+            <div className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-white border-2 border-slate-900"></span><span>② グループ(白・鍵かっこ)</span></div>
             <div className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-rose-100 border-2 border-rose-400"></span><span className="text-rose-700">② リーダー(赤)</span></div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <div className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-lg border border-slate-300 shadow-2xs">
               <span className="text-xs font-black text-slate-600">🔍 ズーム:</span>
               <button
@@ -239,8 +273,16 @@ export default function TabEditor({
         </div>
       </div>
 
-      {/* 右側カラム（4/12）：座席関数 ＆ コントローラー */}
-      <div className="lg:col-span-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+      {/* ★ ドラッグで幅を変えられるリサイザー（PC時のみ表示） */}
+      <div 
+        className="hidden lg:flex w-6 cursor-col-resize items-center justify-center group shrink-0"
+        onMouseDown={handleResizeMouseDown}
+      >
+        <div className="w-1.5 h-20 bg-slate-300 group-hover:bg-indigo-500 rounded-full transition-colors shadow-sm" />
+      </div>
+
+      {/* 右側カラム：座席関数 ＆ コントローラー（flex-1で残り幅を自動拡張） */}
+      <div className="w-full lg:flex-1 bg-white p-4 sm:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6 overflow-hidden min-w-[300px]">
         <div className="border-b pb-3">
           <h3 className="font-extrabold text-lg text-slate-800">座席表コントロール</h3>
           <p className="text-xs text-slate-500 mt-0.5">数式の計算値と答え（生徒番号）を切り替えます。</p>
@@ -263,13 +305,12 @@ export default function TabEditor({
             )}
           </button>
 
-          {/* ★ 数式の大きさを自在に変えられる特大表示パネル！ */}
-          <div className="p-4 sm:p-5 bg-slate-900 text-white rounded-2xl shadow-inner text-center space-y-3">
+          <div className="p-4 sm:p-6 bg-slate-900 text-white rounded-2xl shadow-inner text-center space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">
                 現在適用中の座席関数
               </span>
-              <div className="flex items-center gap-1.5 bg-slate-800 px-2 py-0.5 rounded-lg border border-slate-700 shadow-sm">
+              <div className="flex items-center gap-1.5 bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm">
                 <span className="text-[10px] font-black text-slate-400">🧮 大きさ:</span>
                 <button
                   type="button"
@@ -294,8 +335,7 @@ export default function TabEditor({
             {seatingFunc ? (
               <div
                 className="font-mono overflow-x-auto py-2 flex justify-center transition-all duration-150"
-                /* 1.125rem (text-lg相当) を基準にスケール */
-                style={{ fontSize: `${1.125 * (mathSizeScale / 100)}rem` }}
+                style={{ fontSize: `${1.25 * (mathSizeScale / 100)}rem` }}
               >
                 <BlockMath math={seatingFunc.latexString} />
               </div>
