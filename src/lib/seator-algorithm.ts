@@ -1,17 +1,15 @@
 import { Student, SeatNode, ClassLayoutTemplate, SeatingFunction } from '@/types';
 
-/** ①（集中・青）生徒の配置順序（後方から前方へ一続きに連続スキャン） */
+/** ①（集中・青）生徒の配置順序（後方から連続スキャン） */
 function getFocusContinuousOrder(rows: number, cols: number, isCombined: boolean): { r: number; c: number }[] {
   const order: { r: number; c: number }[] = [];
   if (!isCombined) {
-    // 通常(6列): 最後列から順に右から左へ
     for (let r = rows; r >= 1; r--) {
       for (let c = cols; c >= 1; c--) {
         order.push({ r, c });
       }
     }
   } else {
-    // ★ 合同(8列): まず両端(1列目と8列目＝①専用エリア)を後方から順番に埋め、次に中央2~7列目の後方へ！
     for (let r = rows; r >= 1; r--) {
       order.push({ r, c: 8 });
       order.push({ r, c: 1 });
@@ -25,7 +23,7 @@ function getFocusContinuousOrder(rows: number, cols: number, isCombined: boolean
   return order;
 }
 
-/** 1人〜36人の固定グループパターン辞書（幅6列基準） */
+/** 1人〜36人の固定グループパターン辞書 */
 function getFixedGroupPatterns(numPeople: number): { id: string; coords: { r: number; c: number }[] }[] {
   switch (numPeople) {
     case 1: return [{ id: 'Group-1', coords: [{ r: 1, c: 3 }] }];
@@ -309,36 +307,31 @@ function getFixedGroupPatterns(numPeople: number): { id: string; coords: { r: nu
   }
 }
 
-/** 37人以上でも下にスライド配置。★合同時(8列)は中央2~7列目に+1列シフトしてはめ込み！ */
+/** 37人以上でも下にスライド配置。合同時は+1列シフト */
 function getScaledGroupPatterns(numPeople: number, isCombined: boolean): { id: string; coords: { r: number; c: number }[] }[] {
   const result: { id: string; coords: { r: number; c: number }[] }[] = [];
   let remaining = numPeople;
   let blockOffset = 0;
   let groupCounter = 1;
-
-  // ★ 合同授業時(8列)は、幅6列辞書の列座標に +1 を足すことで、両端(1列目と8列目)を避けて中央2~7列目に配置！
   const colShift = isCombined ? 1 : 0;
 
   while (remaining > 0) {
     const currentBatch = Math.min(remaining, 36);
     const basePatterns = getFixedGroupPatterns(currentBatch);
-
     for (const pat of basePatterns) {
       result.push({
         id: `Group-${groupCounter++}`,
         coords: pat.coords.map(c => ({ r: c.r + (blockOffset * 6), c: c.c + colShift }))
       });
     }
-
     remaining -= currentBatch;
     blockOffset++;
   }
-
   return result;
 }
 
 /**
- * 最適化席替えメインエンジン（配慮事項100%適用＆合同時両端①専用化版）
+ * 最適化席替えメインエンジン（双方向リンクのペア絶対隣接アルゴリズム搭載版）
  */
 export function generateOptimizedSeatingChart(
   students: Student[],
@@ -364,10 +357,9 @@ export function generateOptimizedSeatingChart(
   );
 
   const activeStudents = students.filter(s => !absenteeIds.includes(`${s.classId}-${s.id}`));
-  const focusStudents = activeStudents.filter(s => s.defaultPref === 1); // ① 集中(青)
-  const groupStudents = activeStudents.filter(s => s.defaultPref === 2); // ② グループ(白/赤)
+  const focusStudents = activeStudents.filter(s => s.defaultPref === 1);
+  const groupStudents = activeStudents.filter(s => s.defaultPref === 2);
 
-  // ステップ0: 休みの生徒分の無効席作成（最後列右端から逆順に空席化）
   const validSeatsCount = grid.flat().filter(s => !s.isInactive).length;
   let seatsToDeactivate = validSeatsCount - activeStudents.length;
 
@@ -382,7 +374,7 @@ export function generateOptimizedSeatingChart(
     }
   }
 
-  // ステップ0.5: 📍 固定席指定(fixedSeatId)の最優先配置
+  // ステップ0.5: 固定席指定の最優先配置
   activeStudents.forEach(stu => {
     if (stu.props.common.fixedSeatId !== undefined && stu.props.common.fixedSeatId > 0) {
       const targetIdx = stu.props.common.fixedSeatId - 1;
@@ -403,8 +395,8 @@ export function generateOptimizedSeatingChart(
   );
 
   // ==========================================
-  // ★ ステップ1: ②（グループ学習）をご指定の辞書にはめ込み！
-  // ★ 合同授業時は列+1シフトされ、両端（1列目と8列目）が確実に空いた状態になります！
+  // ★ ステップ1: ②（グループ）を辞書にはめ込み ＆ 「🤝 同グループペア希望」の最優先割り当て！
+  // 双方向リンクにより、確実に相手を同じ島に引き込みます。
   // ==========================================
   const groupPatterns = getScaledGroupPatterns(remainingGroupStudents.length, isCombined);
   
@@ -437,22 +429,42 @@ export function generateOptimizedSeatingChart(
         targetSeats[0].studentClassId = leaders[i].classId;
         targetSeats[0].role = 'leader';
       }
+
       for (let j = 1; j < targetSeats.length; j++) {
         if (members.length > 0) {
-          const member = members.shift()!;
-          targetSeats[j].studentId = member.id;
-          targetSeats[j].studentClassId = member.classId;
+          let memberToAssign: Student | undefined = undefined;
+
+          // すでにこの島に入っている生徒のペア希望を双方向でチェック！
+          const currentGroupStudents = targetSeats.slice(0, j)
+            .map(s => activeStudents.find(st => st.classId === s.studentClassId && st.id === s.studentId))
+            .filter(Boolean) as Student[];
+
+          for (const currStu of currentGroupStudents) {
+            if (currStu.props.common.customPairs && currStu.props.common.customPairs.length > 0) {
+              const pairIdx = members.findIndex(m => currStu.props.common.customPairs?.includes(m.id) && m.classId === currStu.classId);
+              if (pairIdx !== -1) {
+                memberToAssign = members.splice(pairIdx, 1)[0];
+                break;
+              }
+            }
+          }
+
+          if (!memberToAssign) {
+            memberToAssign = members.shift()!;
+          }
+
+          targetSeats[j].studentId = memberToAssign.id;
+          targetSeats[j].studentClassId = memberToAssign.classId;
           targetSeats[j].role = 'member';
         }
       }
     }
   }
 
-  // 万が一辞書で収まらなかった端数メンバーの補完（両端列は絶対に避ける！）
   while (members.length > 0) {
     const remainingEmptySeats = grid.flat().filter(s => 
       !s.isInactive && s.studentId === null && !s.groupId &&
-      (!isCombined || (s.col >= 2 && s.col <= cols - 1)) // ★ 合同時に両端列へ漏れるのを防止！
+      (!isCombined || (s.col >= 2 && s.col <= cols - 1))
     );
     if (remainingEmptySeats.length === 0) break;
     const member = members.shift()!;
@@ -463,8 +475,7 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ2: ①（個人・集中）の後方から連続スキャン配置 ＆ 前列・後列希望の反映！
-  // ★ 合同授業時、1列目と8列目（両端）が空いているため、①の生徒がまずその静かな両端列へ入り、残りは後方へ！
+  // ★ ステップ2: ①（個人・集中）の後方から連続スキャン配置 ＆ 【①と②の境界ペア・①同士の絶対隣接ペア】の反映！
   // ==========================================
   const focusOrder = getFocusContinuousOrder(rows, cols, isCombined);
   const emptySeatsForFocus = grid.flat().filter(s => !s.isInactive && s.studentId === null);
@@ -473,7 +484,7 @@ export function generateOptimizedSeatingChart(
     const idxB = focusOrder.findIndex(o => o.r === b.row && o.c === b.col);
     const valA = idxA === -1 ? 9999 : idxA;
     const valB = idxB === -1 ? 9999 : idxB;
-    return valA - valB; // [0]が最後列(または両端)、最後が最前列になるようソート
+    return valA - valB;
   });
 
   const backWishers = remainingFocusStudents.filter(s => s.props.whenType1.preferBackRow && !s.props.whenType1.preferFrontRow);
@@ -488,14 +499,61 @@ export function generateOptimizedSeatingChart(
     ...shuffle(frontWishers)
   ];
 
-  let focusIdx = 0;
-  for (const seat of emptySeatsForFocus) {
-    if (focusIdx >= orderedFocusStudents.length) break;
-    const stu = orderedFocusStudents[focusIdx];
+  // 【ステップ2-1】: ①と②のペア（すでに配置済みの②の隣接に、優先して①を配置する！）
+  for (const stu of orderedFocusStudents) {
+    if (grid.flat().some(s => s.studentClassId === stu.classId && s.studentId === stu.id)) continue;
+    
+    if (stu.props.common.customPairs && stu.props.common.customPairs.length > 0) {
+      for (const pairId of stu.props.common.customPairs) {
+        // ペア相手がすでに②（または固定席）として座っているか探す
+        const pairSeat = grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === pairId && s.role !== 'focus');
+        if (pairSeat) {
+          // その席の「上下左右」で、まだ①用の空き席として残っている席をピンポイントで探す
+          const adjSeat = emptySeatsForFocus.find(s => 
+            s.studentId === null && 
+            (Math.abs(s.row - pairSeat.row) + Math.abs(s.col - pairSeat.col) === 1)
+          );
+          if (adjSeat) {
+            adjSeat.studentId = stu.id;
+            adjSeat.studentClassId = stu.classId;
+            adjSeat.role = 'focus';
+            break; // 境界での隣接配置成功！
+          }
+        }
+      }
+    }
+  }
+
+  // 【ステップ2-2】: ①同士のペア（残りの①を配置しながら、ペアなら強制的に隣の空き席に置く！）
+  for (const stu of orderedFocusStudents) {
+    if (grid.flat().some(s => s.studentClassId === stu.classId && s.studentId === stu.id)) continue;
+
+    // 次に優先順位が高い空き席を探す
+    const seat = emptySeatsForFocus.find(s => s.studentId === null);
+    if (!seat) break;
+
     seat.studentId = stu.id;
     seat.studentClassId = stu.classId;
     seat.role = 'focus';
-    focusIdx++;
+
+    // もしこの生徒にペア相手がいて、まだ座っていない場合、今の席の「上下左右」の空き席へ強制配置する！
+    if (stu.props.common.customPairs && stu.props.common.customPairs.length > 0) {
+      for (const pairId of stu.props.common.customPairs) {
+        const pairStu = orderedFocusStudents.find(s => s.classId === stu.classId && s.id === pairId);
+        if (pairStu && !grid.flat().some(s => s.studentClassId === pairStu.classId && s.studentId === pairStu.id)) {
+          // 今座った seat の上下左右で空いている席を最優先確保
+          const adjSeat = emptySeatsForFocus.find(s => 
+            s.studentId === null && 
+            (Math.abs(s.row - seat.row) + Math.abs(s.col - seat.col) === 1)
+          );
+          if (adjSeat) {
+            adjSeat.studentId = pairStu.id;
+            adjSeat.studentClassId = pairStu.classId;
+            adjSeat.role = 'focus';
+          }
+        }
+      }
+    }
   }
 
   // ==========================================
@@ -519,7 +577,7 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ4: ❄️ エアコン回避(avoidAC)の最適化スワップ！
+  // ★ ステップ4: エアコン回避の最適化スワップ！
   // ==========================================
   grid.flat().forEach(seat => {
     if (seat.isAC_Zone && seat.studentId !== null) {

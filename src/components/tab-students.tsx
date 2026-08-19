@@ -31,8 +31,6 @@ export default function TabStudents({
   const [showScores, setShowScores] = useState<boolean>(false);
   const [openStudentId, setOpenStudentId] = useState<number | null>(null);
   const [selectedArchive, setSelectedArchive] = useState<SeatingArchive | null>(null);
-
-  // ★ ご指示通り「新形式＝座席希望」「旧形式＝成績入力」の切り替えモードを新設！
   const [importMode, setImportMode] = useState<ImportMode>('seat-pref');
 
   const maxNum = getMaxStudents(currentClass);
@@ -64,10 +62,8 @@ export default function TabStudents({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      // ★ 既存の生徒配列(students)とモード(importMode)を渡し、両方のデータを消さずにスマート統合！
       const mergedStudents = await parseExcelData(file, currentClass, importMode, students);
       onUpdateStudents(mergedStudents);
-      
       const modeLabel = importMode === 'seat-pref' ? '座席希望（新形式・G列/K列）' : '成績スコア（旧形式・各クラス列）';
       alert(`Excelファイルから『 ${modeLabel} 』をインポートし、既存データと統合・保存しました！`);
     } catch (err) {
@@ -75,10 +71,49 @@ export default function TabStudents({
     }
   };
 
+  // ★ ペア(customPairs)の双方向リンク自動更新を組み込んだプロパティ更新関数
   const handleUpdateStudentProp = (stu: Student, updates: Partial<Student>) => {
-    const updatedStudent = { ...stu, ...updates };
-    const otherStudents = students.filter(s => !(s.classId === stu.classId && s.id === stu.id));
-    onUpdateStudents([...otherStudents, updatedStudent]);
+    let updatedStudents = [...students];
+
+    // ペア希望の更新が含まれているかチェック
+    if (updates.props?.common?.customPairs !== undefined) {
+      const oldPairs = stu.props.common.customPairs || [];
+      const newPairs = updates.props.common.customPairs;
+
+      const added = newPairs.filter(p => !oldPairs.includes(p));
+      const removed = oldPairs.filter(p => !newPairs.includes(p));
+
+      updatedStudents = updatedStudents.map(s => {
+        if (s.classId === stu.classId) {
+          // 新しくペアに追加された生徒には、自分(stu.id)をペアに追加する
+          if (added.includes(s.id)) {
+            const cp = s.props.common.customPairs || [];
+            if (!cp.includes(stu.id)) {
+              return { ...s, props: { ...s.props, common: { ...s.props.common, customPairs: [...cp, stu.id] } } };
+            }
+          }
+          // ペアから外された生徒からは、自分(stu.id)をペアから削除する
+          if (removed.includes(s.id)) {
+            const cp = s.props.common.customPairs || [];
+            if (cp.includes(stu.id)) {
+              return { ...s, props: { ...s.props, common: { ...s.props.common, customPairs: cp.filter(id => id !== stu.id) } } };
+            }
+          }
+        }
+        return s;
+      });
+    }
+
+    // 更新対象の生徒自身のデータを上書き
+    const idx = updatedStudents.findIndex(s => s.classId === stu.classId && s.id === stu.id);
+    if (idx !== -1) {
+      updatedStudents[idx] = { ...updatedStudents[idx], ...updates };
+    } else {
+      // 未登録生徒だった場合は配列に追加
+      updatedStudents.push({ ...stu, ...updates });
+    }
+
+    onUpdateStudents(updatedStudents);
   };
 
   const handleToggleSeatState = (idx: number) => {
@@ -172,7 +207,6 @@ export default function TabStudents({
               <p className="text-xs text-slate-500 mt-0.5">※生徒行をクリックするとその場で配慮事項や希望区分をアコーディオン編集できます。</p>
             </div>
 
-            {/* ★ 形式切替スイッチ ＆ インポート実行ボタン */}
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs font-black">
                 <button
@@ -254,7 +288,7 @@ export default function TabStudents({
                                 <span className="font-black text-sm text-indigo-300">
                                   ⚡ 配慮詳細エディタ: {stu.name} ({stu.id}番)
                                 </span>
-                                <span className="text-[10px] text-indigo-400 font-medium">※変更は自動で即時反映・保存されます</span>
+                                <span className="text-[10px] text-indigo-400 font-medium">※変更は自動で即時反映・双方向保存されます</span>
                               </div>
 
                               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs font-bold">
