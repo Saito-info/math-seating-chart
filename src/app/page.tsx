@@ -8,10 +8,22 @@ import TabEditor from '@/components/tab-editor';
 import { generateOptimizedSeatingChart } from '@/lib/seator-algorithm';
 
 const LAYOUT_STORAGE_KEY = 'seating_app_layouts_v5';
+const SHARED_AC_STORAGE_KEY = 'seating_app_shared_ac_v5';
 const STUDENTS_STORAGE_KEY = 'seating_app_students_v5';
 const ABSENTEES_STORAGE_KEY = 'seating_app_absentees_v5';
 const CLASS_STORAGE_KEY = 'seating_app_class_v5';
 const ARCHIVES_STORAGE_KEY = 'seating_app_archives_v5';
+
+const DEFAULT_SHARED_AC: number[] = [19, 20, 21, 22, 25, 26, 27, 28];
+
+/** 既存レイアウトから共通ACを推定（移行用） */
+function resolveSharedAc(layouts: { [key in ClassId]?: ClassLayoutTemplate }, saved?: number[] | null): number[] {
+  if (saved && Array.isArray(saved)) return saved;
+  for (const layout of Object.values(layouts)) {
+    if (layout?.acSeatIndices && layout.acSeatIndices.length > 0) return [...layout.acSeatIndices];
+  }
+  return [...DEFAULT_SHARED_AC];
+}
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'students' | 'formula' | 'editor'>('students');
@@ -21,6 +33,7 @@ export default function Home() {
   const [seats, setSeats] = useState<SeatNode[]>([]);
   const [cols, setCols] = useState<number>(6);
   const [layouts, setLayouts] = useState<{ [key in ClassId]?: ClassLayoutTemplate }>({});
+  const [sharedAcSeatIndices, setSharedAcSeatIndices] = useState<number[]>(DEFAULT_SHARED_AC);
   const [archives, setArchives] = useState<SeatingArchive[]>([]);
   const [currentFunc, setCurrentFunc] = useState<SeatingFunction | undefined>(undefined);
   const [isCombinedMode, setIsCombinedMode] = useState<boolean>(false);
@@ -29,12 +42,17 @@ export default function Home() {
 
   useEffect(() => {
     const savedLayouts = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    const savedSharedAc = localStorage.getItem(SHARED_AC_STORAGE_KEY);
     const savedStudents = localStorage.getItem(STUDENTS_STORAGE_KEY);
     const savedAbsentees = localStorage.getItem(ABSENTEES_STORAGE_KEY);
     const savedClass = localStorage.getItem(CLASS_STORAGE_KEY);
     const savedArchives = localStorage.getItem(ARCHIVES_STORAGE_KEY);
 
-    if (savedLayouts) try { setLayouts(JSON.parse(savedLayouts)); } catch (e) { console.error(e); }
+    let parsedLayouts: { [key in ClassId]?: ClassLayoutTemplate } = {};
+    if (savedLayouts) try { parsedLayouts = JSON.parse(savedLayouts); setLayouts(parsedLayouts); } catch (e) { console.error(e); }
+    let parsedSharedAc: number[] | null = null;
+    if (savedSharedAc) try { parsedSharedAc = JSON.parse(savedSharedAc); } catch (e) { console.error(e); }
+    setSharedAcSeatIndices(resolveSharedAc(parsedLayouts, parsedSharedAc));
     if (savedStudents) try { setStudents(JSON.parse(savedStudents)); } catch (e) { console.error(e); }
     if (savedAbsentees) try { setAbsenteeIds(JSON.parse(savedAbsentees)); } catch (e) { console.error(e); }
     if (savedArchives) try { setArchives(JSON.parse(savedArchives)); } catch (e) { console.error(e); }
@@ -45,6 +63,7 @@ export default function Home() {
   useEffect(() => { if (isLoaded) localStorage.setItem(STUDENTS_STORAGE_KEY, JSON.stringify(students)); }, [students, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(ABSENTEES_STORAGE_KEY, JSON.stringify(absenteeIds)); }, [absenteeIds, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layouts)); }, [layouts, isLoaded]);
+  useEffect(() => { if (isLoaded) localStorage.setItem(SHARED_AC_STORAGE_KEY, JSON.stringify(sharedAcSeatIndices)); }, [sharedAcSeatIndices, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(CLASS_STORAGE_KEY, currentClass); }, [currentClass, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(ARCHIVES_STORAGE_KEY, JSON.stringify(archives)); }, [archives, isLoaded]);
 
@@ -65,15 +84,13 @@ export default function Home() {
 
     const baseClassId = targetClasses[0] || currentClass;
     const savedLayout = layouts[baseClassId];
-    const has2_5 = isCombined ? targetClasses.includes('2-5') : currentClass === '2-5';
-    const defaultAcIndices = has2_5 ? [19, 20, 21, 22, 25, 26, 27, 28] : [];
     const activeDisabledIndices = isCombined ? [] : (savedLayout?.disabledSeatIndices || []);
 
     const layout: ClassLayoutTemplate = {
       classLabel: isCombined ? `${targetClasses.join('・')} 合同` : currentClass,
       cols: layoutCols,
       rows: layoutRows,
-      acSeatIndices: savedLayout?.acSeatIndices || defaultAcIndices,
+      acSeatIndices: sharedAcSeatIndices,
       disabledSeatIndices: activeDisabledIndices,
     };
 
@@ -98,7 +115,21 @@ export default function Home() {
       }
     }
 
-    const generatedSeats = generateOptimizedSeatingChart(targetStudents, absenteeIds, layout, isCombined, func);
+    // 対象クラスを含むアーカイブのうち、最も新しいものを非重複参照に使う
+    const relevantArchives = archives.filter(a =>
+      classesToProcess.every(c => a.targetClasses.includes(c)) &&
+      a.lessonType === (isCombined ? 'combined' : 'normal')
+    );
+    const newestArchive = relevantArchives[0]; // 保存時に先頭追加のため [0] が最新
+
+    const generatedSeats = generateOptimizedSeatingChart(
+      targetStudents,
+      absenteeIds,
+      layout,
+      isCombined,
+      func,
+      newestArchive?.seats
+    );
     setSeats(generatedSeats);
     setActiveTab('editor');
   };
@@ -172,6 +203,8 @@ export default function Home() {
               onChangeClass={setCurrentClass}
               layouts={layouts}
               onUpdateLayouts={setLayouts}
+              sharedAcSeatIndices={sharedAcSeatIndices}
+              onUpdateSharedAc={setSharedAcSeatIndices}
               archives={archives}
               onDeleteArchive={(id) => setArchives(prev => prev.filter(a => a.id !== id))}
             />

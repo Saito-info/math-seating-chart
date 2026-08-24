@@ -13,6 +13,8 @@ type Props = {
   onChangeClass: (cId: ClassId) => void;
   layouts: { [key in ClassId]?: ClassLayoutTemplate };
   onUpdateLayouts: (layouts: { [key in ClassId]?: ClassLayoutTemplate }) => void;
+  sharedAcSeatIndices: number[];
+  onUpdateSharedAc: (indices: number[]) => void;
   archives: SeatingArchive[];
   onDeleteArchive: (id: string) => void;
 };
@@ -24,6 +26,8 @@ export default function TabStudents({
   onChangeClass,
   layouts,
   onUpdateLayouts,
+  sharedAcSeatIndices,
+  onUpdateSharedAc,
   archives,
   onDeleteArchive,
 }: Props) {
@@ -52,7 +56,7 @@ export default function TabStudents({
     classLabel: currentClass,
     cols: 6,
     rows: 7,
-    acSeatIndices: currentClass === '2-5' ? [19, 20, 21, 22, 25, 26, 27, 28] : [],
+    acSeatIndices: sharedAcSeatIndices,
     disabledSeatIndices: [],
   };
 
@@ -71,45 +75,58 @@ export default function TabStudents({
     }
   };
 
-  // ★ ペア(customPairs)の双方向リンク自動更新を組み込んだプロパティ更新関数
+  // ★ ペア(customPairs)の双方向・複数人相互リンク自動更新
   const handleUpdateStudentProp = (stu: Student, updates: Partial<Student>) => {
     let updatedStudents = [...students];
 
-    // ペア希望の更新が含まれているかチェック
     if (updates.props?.common?.customPairs !== undefined) {
       const oldPairs = stu.props.common.customPairs || [];
       const newPairs = updates.props.common.customPairs;
-
-      const added = newPairs.filter(p => !oldPairs.includes(p));
       const removed = oldPairs.filter(p => !newPairs.includes(p));
+      const clique = [stu.id, ...newPairs];
 
       updatedStudents = updatedStudents.map(s => {
-        if (s.classId === stu.classId) {
-          // 新しくペアに追加された生徒には、自分(stu.id)をペアに追加する
-          if (added.includes(s.id)) {
-            const cp = s.props.common.customPairs || [];
-            if (!cp.includes(stu.id)) {
-              return { ...s, props: { ...s.props, common: { ...s.props.common, customPairs: [...cp, stu.id] } } };
-            }
-          }
-          // ペアから外された生徒からは、自分(stu.id)をペアから削除する
-          if (removed.includes(s.id)) {
-            const cp = s.props.common.customPairs || [];
-            if (cp.includes(stu.id)) {
-              return { ...s, props: { ...s.props, common: { ...s.props.common, customPairs: cp.filter(id => id !== stu.id) } } };
-            }
+        if (s.classId !== stu.classId) return s;
+
+        // クリューク内の生徒は、互いの番号をすべて持つ
+        if (clique.includes(s.id)) {
+          const others = clique.filter(id => id !== s.id);
+          const existing = s.props.common.customPairs || [];
+          // クリューク外の既存リンクは維持（今回 stu から外された番号は除く）
+          const outside = existing.filter(id => !clique.includes(id) && !removed.includes(id));
+          return {
+            ...s,
+            props: {
+              ...s.props,
+              common: {
+                ...s.props.common,
+                customPairs: Array.from(new Set([...others, ...outside])),
+              },
+            },
+          };
+        }
+
+        // クリュークから外された生徒は、stu とのリンクだけ外す
+        if (removed.includes(s.id)) {
+          const cp = s.props.common.customPairs || [];
+          if (cp.includes(stu.id)) {
+            return {
+              ...s,
+              props: {
+                ...s.props,
+                common: { ...s.props.common, customPairs: cp.filter(id => id !== stu.id) },
+              },
+            };
           }
         }
         return s;
       });
     }
 
-    // 更新対象の生徒自身のデータを上書き
     const idx = updatedStudents.findIndex(s => s.classId === stu.classId && s.id === stu.id);
     if (idx !== -1) {
       updatedStudents[idx] = { ...updatedStudents[idx], ...updates };
     } else {
-      // 未登録生徒だった場合は配列に追加
       updatedStudents.push({ ...stu, ...updates });
     }
 
@@ -117,17 +134,28 @@ export default function TabStudents({
   };
 
   const handleToggleSeatState = (idx: number) => {
-    const isAC = currentLayout.acSeatIndices.includes(idx);
+    const isAC = sharedAcSeatIndices.includes(idx);
     const isDisabled = currentLayout.disabledSeatIndices.includes(idx);
 
-    let nextAC = [...currentLayout.acSeatIndices];
+    let nextAC = [...sharedAcSeatIndices];
     let nextDisabled = [...currentLayout.disabledSeatIndices];
 
-    if (!isAC && !isDisabled) nextAC.push(idx);
-    else if (isAC) {
+    if (!isAC && !isDisabled) {
+      // 通常 → エアコン（全教室共通）
+      nextAC.push(idx);
+      onUpdateSharedAc(nextAC);
+    } else if (isAC && !isDisabled) {
+      // エアコン → このクラスのみ無効席（エアコン指定自体は全教室から外す）
       nextAC = nextAC.filter(i => i !== idx);
       nextDisabled.push(idx);
+      onUpdateSharedAc(nextAC);
+      onUpdateLayouts({
+        ...layouts,
+        [currentClass]: { ...currentLayout, acSeatIndices: nextAC, disabledSeatIndices: nextDisabled },
+      });
+      return;
     } else {
+      // 無効 → 通常
       nextDisabled = nextDisabled.filter(i => i !== idx);
     }
 
@@ -275,7 +303,7 @@ export default function TabStudents({
                             {stu.props.common.fixedSeatId && `📍固定(${stu.props.common.fixedSeatId}番席) `}
                             {stu.props.whenType1.preferFrontRow && '⬆️前列希望 '}
                             {stu.props.whenType1.preferBackRow && '⬇️後列希望 '}
-                            {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝ペア(${stu.props.common.customPairs.join(',')}) `}
+                            {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${stu.props.common.customPairs.join(',')}) `}
                           </span>
                         </td>
                       </tr>
@@ -349,11 +377,11 @@ export default function TabStudents({
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🤝 隣接/同班ペア(番号):</span>
+                                  <span className="shrink-0 mr-2">🤝 隣接/同グループ(複数可・番号):</span>
                                   <input
                                     type="text"
                                     value={pairsStr}
-                                    placeholder="例: 5, 12"
+                                    placeholder="例: 5, 12, 18"
                                     onChange={(e) => {
                                       const nums = e.target.value
                                         .split(',')
@@ -410,11 +438,13 @@ export default function TabStudents({
           <div className="border-b pb-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
             <div>
               <h3 className="font-extrabold text-lg text-slate-800">{currentClass} デフォルト教室レイアウト設定</h3>
-              <p className="text-xs text-slate-500 mt-0.5">※変更は即座にブラウザに保存され、席替え生成時に必ず参照されます。</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                ※❄️エアコン席は<strong className="text-cyan-700">全教室共通</strong>です。無効席のみクラスごとに設定できます。変更は即座に保存されます。
+              </p>
             </div>
             <div className="flex gap-4 text-xs font-extrabold">
               <span className="flex items-center gap-1"><span className="w-3.5 h-3.5 bg-white border-2 border-slate-300 inline-block rounded"></span>通常</span>
-              <span className="flex items-center gap-1"><span className="w-3.5 h-3.5 bg-cyan-100 border-2 border-cyan-500 inline-block rounded"></span>エアコン席</span>
+              <span className="flex items-center gap-1"><span className="w-3.5 h-3.5 bg-cyan-100 border-2 border-cyan-500 inline-block rounded"></span>エアコン席（共通）</span>
               <span className="flex items-center gap-1"><span className="w-3.5 h-3.5 bg-slate-200 border-2 border-slate-400 inline-block rounded"></span>使わない席</span>
             </div>
           </div>
@@ -425,13 +455,13 @@ export default function TabStudents({
             </div>
             <div className="grid grid-cols-6 gap-2.5">
               {Array.from({ length: 42 }, (_, i) => {
-                const isAC = currentLayout.acSeatIndices.includes(i);
+                const isAC = sharedAcSeatIndices.includes(i);
                 const isDisabled = currentLayout.disabledSeatIndices.includes(i);
                 const r = Math.floor(i / 6) + 1;
                 const c = (i % 6) + 1;
 
                 let style = 'bg-white border-slate-300 text-slate-700 hover:border-indigo-400 shadow-2xs';
-                if (isAC) style = 'bg-cyan-100 border-cyan-500 text-cyan-950 font-black shadow-inner';
+                if (isAC && !isDisabled) style = 'bg-cyan-100 border-cyan-500 text-cyan-950 font-black shadow-inner';
                 if (isDisabled) style = 'bg-slate-200 border-slate-400 text-slate-400 opacity-60 line-through';
 
                 return (
@@ -442,7 +472,7 @@ export default function TabStudents({
                     className={`h-14 rounded-lg border-2 flex flex-col items-center justify-center text-xs transition cursor-pointer select-none ${style}`}
                   >
                     <span className="text-[9px] font-mono opacity-60">({r},{c})</span>
-                    <span>{isAC ? '❄️ エアコン' : isDisabled ? '🚫 無効' : `席 ${i + 1}`}</span>
+                    <span>{isDisabled ? '🚫 無効' : isAC ? '❄️ エアコン' : `席 ${i + 1}`}</span>
                   </button>
                 );
               })}
