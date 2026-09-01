@@ -6,7 +6,13 @@ import { parseExcelData, ImportMode } from '@/lib/excel-parser';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
-import { parseStudentNumberList } from '@/lib/student-number-list';
+/** カンマ・全角カンマ・読点・スペース区切りの出席番号リストをパース */
+function parseStudentNumberList(input: string, selfId: number): number[] {
+  return input
+    .split(/[,，、\s]+/)
+    .map(s => Number(s.trim()))
+    .filter(n => !isNaN(n) && n > 0 && n !== selfId);
+}
 
 type Props = {
   students: Student[];
