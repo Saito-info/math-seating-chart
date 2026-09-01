@@ -3,15 +3,28 @@ import { Student, StudentProperties, ClassId } from '@/types';
 
 export type ImportMode = 'seat-pref' | 'score';
 
-/** Excel列: F=5, J=9 (0始まり) */
-const COL_SEAT_PREF_ID = 5;
-const COL_SEAT_PREF_VALUE = 9;
+export type SeatPrefImportSummary = {
+  count: number;
+  classes: ClassId[];
+  focusCount: number;
+  groupCount: number;
+  sheetName: string;
+};
+
+export type ParseExcelResult = {
+  students: Student[];
+  seatPrefImport?: SeatPrefImportSummary;
+};
+
+/** デフォルト列: F=5, J=9 (Microsoft Forms ふりかえり形式) */
+const DEFAULT_ID_COL = 5;
+const DEFAULT_PREF_COL = 9;
 
 function isHeaderLike(value: string): boolean {
-  return /出席|番号|希望|座席|クラス|氏名|name/i.test(value);
+  return /出席|番号|希望|座席|クラス|氏名|name|id/i.test(value);
 }
 
-/** F列の出席番号セルを { classId, exID } に変換 */
+/** F列等の出席番号セルを { classId, exID } に変換 */
 function parseStudentIdFromCell(
   raw: unknown,
   currentClassId: ClassId
@@ -24,7 +37,7 @@ function parseStudentIdFromCell(
   const num = Number(str);
   if (isNaN(num)) return null;
 
-  // 4桁形式 (例: 2201 → 2年2組1番)
+  // 4桁形式 (例: 2502 → 2年5組2番)
   if (num >= 1000 && num <= 3999) {
     const exID = num % 100;
     const classNum = Math.floor((num % 1000) / 100);
@@ -43,7 +56,7 @@ function parseStudentIdFromCell(
   return null;
 }
 
-/** J列の希望座席セルを 1(集中) / 2(グループ) に変換 */
+/** J列等の希望座席セルを 1(集中) / 2(グループ) に変換 */
 function parsePrefFromCell(raw: unknown): 1 | 2 {
   if (raw === undefined || raw === null || raw === '') return 2;
 
@@ -60,16 +73,88 @@ function parsePrefFromCell(raw: unknown): 1 | 2 {
   return 2;
 }
 
+/** Microsoft Forms 等: ヘッダー行から出席番号列・希望列を自動検出 */
+function detectSeatPrefColumns(rawData: unknown[][]): {
+  idCol: number;
+  prefCol: number;
+  dataStartRow: number;
+} {
+  for (let rowIdx = 0; rowIdx < Math.min(10, rawData.length); rowIdx++) {
+    const row = rawData[rowIdx] || [];
+    let idCol = -1;
+    let prefCol = -1;
+
+    for (let colIdx = 0; colIdx < row.length; colIdx++) {
+      const cell = String(row[colIdx] ?? '').trim();
+      if (/出席番号|4桁/.test(cell)) idCol = colIdx;
+      if (/次回.*授業|どのように受け|希望.*座席|座席.*希望|受けたいですか/.test(cell)) prefCol = colIdx;
+    }
+
+    if (idCol !== -1) {
+      return {
+        idCol,
+        prefCol: prefCol !== -1 ? prefCol : DEFAULT_PREF_COL,
+        dataStartRow: rowIdx + 1,
+      };
+    }
+  }
+
+  return { idCol: DEFAULT_ID_COL, prefCol: DEFAULT_PREF_COL, dataStartRow: 1 };
+}
+
+/** 座席希望データを含むシートを優先選択 */
+function pickWorksheet(workbook: XLSX.WorkBook): { sheetName: string; worksheet: XLSX.WorkSheet } {
+  if (workbook.SheetNames.includes('配置決め')) {
+    return { sheetName: '配置決め', worksheet: workbook.Sheets['配置決め'] };
+  }
+
+  for (const name of workbook.SheetNames) {
+    const ws = workbook.Sheets[name];
+    const preview: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    for (let r = 0; r < Math.min(5, preview.length); r++) {
+      const row = preview[r] || [];
+      if (row.some(cell => /出席番号|4桁/.test(String(cell ?? '')))) {
+        return { sheetName: name, worksheet: ws };
+      }
+    }
+  }
+
+  const sheetName = workbook.SheetNames[0];
+  return { sheetName, worksheet: workbook.Sheets[sheetName] };
+}
+
+function upsertStudentPref(
+  studentsMap: Map<string, Student>,
+  classId: ClassId,
+  exID: number,
+  defaultPref: 1 | 2
+): void {
+  const key = `${classId}-${exID}`;
+  const existing = studentsMap.get(key);
+  if (existing) {
+    studentsMap.set(key, { ...existing, defaultPref });
+  } else {
+    studentsMap.set(key, {
+      id: exID,
+      classId,
+      name: `${classId} ${exID}番`,
+      defaultPref,
+      score: 0,
+      props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
+    });
+  }
+}
+
 /**
  * Excelファイルを読み込み、選択されたモード（座席希望 or 成績入力）に応じて
- * 既存の生徒データと賢くマージ・更新した新しい生徒配列を返します。
+ * 既存の生徒データとマージした新しい生徒配列を返します。
  */
 export async function parseExcelData(
   file: File,
   currentClassId: ClassId,
   mode: ImportMode,
   existingStudents: Student[]
-): Promise<Student[]> {
+): Promise<ParseExcelResult> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
@@ -78,55 +163,47 @@ export async function parseExcelData(
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
 
-        const sheetName = workbook.SheetNames.includes('配置決め')
-          ? '配置決め'
-          : workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
+        const { sheetName, worksheet } = pickWorksheet(workbook);
+        const rawData: unknown[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
-        const rawData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-        
-        // ★ 既存の生徒データを展開し、編集済みの配慮事項や他方のデータを消さないようにベースにします
         const studentsMap = new Map<string, Student>();
-        existingStudents.forEach(s => studentsMap.set(`${s.classId}-${s.id}`, { ...s }));
+        existingStudents.forEach(s => studentsMap.set(`${s.classId}-${s.id}`, { ...s, props: { ...s.props, common: { ...s.props.common } } }));
 
         const gradePrefix = currentClassId.split('-')[0] + '-';
+        let seatPrefImport: SeatPrefImportSummary | undefined;
 
         if (mode === 'seat-pref') {
-          // ==========================================
-          // ★ モード1: 新形式（座席希望インポート・F列/J列）
-          // F列: 出席番号（4桁形式 2201 または 1〜40）
-          // J列: 希望座席（1:集中, 2:グループ）
-          // ==========================================
-          for (let rowIdx = 0; rowIdx < rawData.length; rowIdx++) {
-            const rawF = rawData[rowIdx]?.[COL_SEAT_PREF_ID];
-            const rawJ = rawData[rowIdx]?.[COL_SEAT_PREF_VALUE];
+          const { idCol, prefCol, dataStartRow } = detectSeatPrefColumns(rawData);
+          const affectedClasses = new Set<ClassId>();
+          let focusCount = 0;
+          let groupCount = 0;
+          let count = 0;
 
-            const parsed = parseStudentIdFromCell(rawF, currentClassId);
+          for (let rowIdx = dataStartRow; rowIdx < rawData.length; rowIdx++) {
+            const rawId = rawData[rowIdx]?.[idCol];
+            const rawPref = rawData[rowIdx]?.[prefCol];
+
+            const parsed = parseStudentIdFromCell(rawId, currentClassId);
             if (!parsed) continue;
 
             const { classId, exID } = parsed;
-            const defaultPref = parsePrefFromCell(rawJ);
-            const key = `${classId}-${exID}`;
+            const defaultPref = parsePrefFromCell(rawPref);
+            upsertStudentPref(studentsMap, classId, exID, defaultPref);
 
-            const existing = studentsMap.get(key);
-            if (existing) {
-              existing.defaultPref = defaultPref;
-            } else {
-              studentsMap.set(key, {
-                id: exID,
-                classId,
-                name: `${classId} ${exID}番`,
-                defaultPref,
-                score: 0,
-                props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
-              });
-            }
+            affectedClasses.add(classId);
+            count++;
+            if (defaultPref === 1) focusCount++;
+            else groupCount++;
           }
+
+          seatPrefImport = {
+            count,
+            classes: [...affectedClasses].sort(),
+            focusCount,
+            groupCount,
+            sheetName,
+          };
         } else {
-          // ==========================================
-          // ★ モード2: 旧形式（成績入力＆基本情報インポート・A〜J列 ＆ L〜U列）
-          // 従来形式の全クラス（1〜5組）を走査し、成績スコアや固定席等の基本設定を反映します。
-          // ==========================================
           for (let classNum = 1; classNum <= 5; classNum++) {
             const classId = `${gradePrefix}${classNum}` as ClassId;
             const maxStudents = (classNum === 1 || classNum === 5) ? 40 : 39;
@@ -157,37 +234,34 @@ export async function parseExcelData(
                   const existing = studentsMap.get(key);
 
                   if (existing) {
-                    // ★ 既存の配慮事項や希望区分を維持しつつ、成績スコアを厳格に反映！
-                    existing.score = score;
-                    // ※旧形式にも希望区分が載っていれば同期反映
-                    existing.defaultPref = defaultPref;
+                    studentsMap.set(key, { ...existing, score, defaultPref });
                   } else {
                     const props: StudentProperties = {
                       common: {
                         avoidAC: (classNum === 5 && exID === 12),
                         fixedSeatId: (classNum === 2 && exID === 24) ? 24 : undefined,
-                        customPairs: []
+                        customPairs: [],
+                        separateFrom: [],
                       },
                       whenType1: {
-                        preferFrontRow: (classNum === 1 && (exID === 15 || exID === 31 || exID === 2 || exID === 21))
+                        preferFrontRow: (classNum === 1 && (exID === 15 || exID === 31 || exID === 2 || exID === 21)),
                       },
-                      whenType2: {}
+                      whenType2: {},
                     };
 
                     studentsMap.set(key, {
                       id: exID,
-                      classId: classId,
+                      classId,
                       name: `${classId} ${exID}番`,
                       defaultPref,
                       score,
-                      props
+                      props,
                     });
                   }
                 }
               }
             }
 
-            // 旧形式のペア希望読み取り (46〜48行目)
             if (hasData) {
               for (let rowIdx = 46; rowIdx <= 48; rowIdx++) {
                 const pair1 = rawData[rowIdx]?.[idColIdx];
@@ -209,7 +283,10 @@ export async function parseExcelData(
           }
         }
 
-        resolve(Array.from(studentsMap.values()));
+        resolve({
+          students: Array.from(studentsMap.values()),
+          seatPrefImport,
+        });
       } catch (error) {
         reject(error);
       }

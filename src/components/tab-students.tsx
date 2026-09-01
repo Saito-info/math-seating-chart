@@ -74,12 +74,38 @@ export default function TabStudents({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const mergedStudents = await parseExcelData(file, currentClass, importMode, students);
-      onUpdateStudents(mergedStudents);
-      const modeLabel = importMode === 'seat-pref' ? '座席希望（新形式・F列/J列）' : '成績スコア（旧形式・各クラス列）';
-      alert(`Excelファイルから『 ${modeLabel} 』をインポートし、既存データと統合・保存しました！`);
+      const result = await parseExcelData(file, currentClass, importMode, students);
+      onUpdateStudents(result.students);
+
+      if (importMode === 'seat-pref') {
+        const summary = result.seatPrefImport;
+        if (!summary || summary.count === 0) {
+          alert(
+            '座席希望データが見つかりませんでした。\n' +
+            'F列（出席番号・4桁）と J列（希望: 1=集中, 2=グループ）を含む Microsoft Forms 形式のファイルか確認してください。'
+          );
+        } else {
+          const classList = summary.classes.join(', ');
+          if (summary.classes.length === 1 && summary.classes[0] !== currentClass) {
+            onChangeClass(summary.classes[0]);
+          }
+          alert(
+            `座席希望をインポートしました！\n\n` +
+            `シート: ${summary.sheetName}\n` +
+            `反映: ${summary.count}名（①集中 ${summary.focusCount}名 / ②グループ ${summary.groupCount}名）\n` +
+            `対象クラス: ${classList}\n\n` +
+            `${summary.classes.includes(currentClass) || summary.classes.length === 1
+              ? 'データ管理画面で希望区分が更新されているかご確認ください。'
+              : `画面上部のクラスを「${classList}」に切り替えてご確認ください。`}`
+          );
+        }
+      } else {
+        alert('Excelファイルから成績スコア（旧形式）をインポートし、既存データと統合・保存しました！');
+      }
     } catch (err) {
       alert('Excelの読み込みに失敗しました。ファイルの形式を確認してください。');
+    } finally {
+      e.target.value = '';
     }
   };
 
