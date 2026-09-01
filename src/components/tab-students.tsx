@@ -76,7 +76,7 @@ export default function TabStudents({
     try {
       const mergedStudents = await parseExcelData(file, currentClass, importMode, students);
       onUpdateStudents(mergedStudents);
-      const modeLabel = importMode === 'seat-pref' ? '座席希望（新形式・G列/K列）' : '成績スコア（旧形式・各クラス列）';
+      const modeLabel = importMode === 'seat-pref' ? '座席希望（新形式・F列/J列）' : '成績スコア（旧形式・各クラス列）';
       alert(`Excelファイルから『 ${modeLabel} 』をインポートし、既存データと統合・保存しました！`);
     } catch (err) {
       alert('Excelの読み込みに失敗しました。ファイルの形式を確認してください。');
