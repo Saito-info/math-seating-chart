@@ -109,7 +109,7 @@ export default function Home() {
             name: `${cId} ${id}番`,
             defaultPref: 2,
             score: 0,
-            props: { common: { customPairs: [] }, whenType1: {}, whenType2: {} }
+            props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} }
           });
         }
       }

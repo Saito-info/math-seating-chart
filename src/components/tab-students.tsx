@@ -6,6 +6,8 @@ import { parseExcelData, ImportMode } from '@/lib/excel-parser';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
+import { parseStudentNumberList } from '@/lib/student-number-list';
+
 type Props = {
   students: Student[];
   onUpdateStudents: (students: Student[]) => void;
@@ -48,7 +50,7 @@ export default function TabStudents({
       name: `${currentClass} ${id}番 (未登録)`,
       defaultPref: 2,
       score: 0,
-      props: { common: { customPairs: [] }, whenType1: {}, whenType2: {} }
+      props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} }
     };
   });
 
@@ -115,6 +117,42 @@ export default function TabStudents({
               props: {
                 ...s.props,
                 common: { ...s.props.common, customPairs: cp.filter(id => id !== stu.id) },
+              },
+            };
+          }
+        }
+        return s;
+      });
+    }
+
+    if (updates.props?.common?.separateFrom !== undefined) {
+      const oldSep = stu.props.common.separateFrom || [];
+      const newSep = updates.props.common.separateFrom;
+      const added = newSep.filter(p => !oldSep.includes(p));
+      const removed = oldSep.filter(p => !newSep.includes(p));
+
+      updatedStudents = updatedStudents.map(s => {
+        if (s.classId !== stu.classId) return s;
+        if (added.includes(s.id)) {
+          const sf = s.props.common.separateFrom || [];
+          if (!sf.includes(stu.id)) {
+            return {
+              ...s,
+              props: {
+                ...s.props,
+                common: { ...s.props.common, separateFrom: [...sf, stu.id] },
+              },
+            };
+          }
+        }
+        if (removed.includes(s.id)) {
+          const sf = s.props.common.separateFrom || [];
+          if (sf.includes(stu.id)) {
+            return {
+              ...s,
+              props: {
+                ...s.props,
+                common: { ...s.props.common, separateFrom: sf.filter(id => id !== stu.id) },
               },
             };
           }
@@ -279,6 +317,7 @@ export default function TabStudents({
                 {allStudentsList.map(stu => {
                   const isOpen = openStudentId === stu.id;
                   const pairsStr = stu.props.common.customPairs?.join(', ') || '';
+                  const separateStr = stu.props.common.separateFrom?.join(', ') || '';
 
                   return (
                     <React.Fragment key={stu.id}>
@@ -304,6 +343,7 @@ export default function TabStudents({
                             {stu.props.whenType1.preferFrontRow && '⬆️前列希望 '}
                             {stu.props.whenType1.preferBackRow && '⬇️後列希望 '}
                             {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${stu.props.common.customPairs.join(',')}) `}
+                            {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣回避(${stu.props.common.separateFrom.join(',')}) `}
                           </span>
                         </td>
                       </tr>
@@ -381,14 +421,28 @@ export default function TabStudents({
                                   <input
                                     type="text"
                                     value={pairsStr}
-                                    placeholder="例: 5, 12, 18"
+                                    placeholder="例: 3, 6, 12"
                                     onChange={(e) => {
-                                      const nums = e.target.value
-                                        .split(',')
-                                        .map(s => Number(s.trim()))
-                                        .filter(n => !isNaN(n) && n > 0 && n !== stu.id);
+                                      const nums = parseStudentNumberList(e.target.value, stu.id);
                                       handleUpdateStudentProp(stu, {
                                         props: { ...stu.props, common: { ...stu.props.common, customPairs: nums } }
+                                      });
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="w-full px-2 py-1 bg-indigo-950 border border-indigo-700 rounded text-white font-mono font-black outline-none focus:ring-1 focus:ring-indigo-400"
+                                  />
+                                </div>
+
+                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
+                                  <span className="shrink-0 mr-2">🚫 隣り合わせ回避(番号):</span>
+                                  <input
+                                    type="text"
+                                    value={separateStr}
+                                    placeholder="例: 3, 6"
+                                    onChange={(e) => {
+                                      const nums = parseStudentNumberList(e.target.value, stu.id);
+                                      handleUpdateStudentProp(stu, {
+                                        props: { ...stu.props, common: { ...stu.props.common, separateFrom: nums } }
                                       });
                                     }}
                                     onClick={(e) => e.stopPropagation()}

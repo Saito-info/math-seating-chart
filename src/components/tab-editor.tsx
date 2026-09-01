@@ -27,18 +27,18 @@ export default function TabEditor({
   const [showAnswer, setShowAnswer] = useState<boolean>(false);
   const [selectedSeatIndex, setSelectedSeatIndex] = useState<number | null>(null);
   
-  const [fontSizeScale, setFontSizeScale] = useState<number>(isCombined ? 85 : 100);
+  const [fontSizeScale, setFontSizeScale] = useState<number>(160);
   const [zoomScale, setZoomScale] = useState<number>(isCombined ? 85 : 100);
-  const [mathSizeScale, setMathSizeScale] = useState<number>(100);
+  const [mathSizeScale, setMathSizeScale] = useState<number>(200);
 
   // ★ 左右ペインのリサイズ機能（左側座席表の幅割合 ％）
-  const [leftPaneWidth, setLeftPaneWidth] = useState<number>(66);
+  const [leftPaneWidth, setLeftPaneWidth] = useState<number>(45);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setFontSizeScale(isCombined ? 85 : 100);
+    setFontSizeScale(160);
     setZoomScale(isCombined ? 85 : 100);
-    setMathSizeScale(100);
+    setMathSizeScale(200);
   }, [isCombined]);
 
   const handleSeatClick = (clickedIndex: number) => {

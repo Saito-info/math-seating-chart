@@ -476,9 +476,49 @@ function isFixedStudent(stu: Student): boolean {
   return stu.props.common.fixedSeatId !== undefined && stu.props.common.fixedSeatId > 0;
 }
 
+function areSeparated(a: Student, b: Student): boolean {
+  if (a.classId !== b.classId) return false;
+  return (
+    (a.props.common.separateFrom?.includes(b.id) ?? false) ||
+    (b.props.common.separateFrom?.includes(a.id) ?? false)
+  );
+}
+
+function getAdjacentSeats(seat: SeatNode, allSeats: SeatNode[]): SeatNode[] {
+  return allSeats.filter(s => !s.isInactive && isAdjacent(seat, s));
+}
+
+function wouldViolateSeparation(
+  seat: SeatNode,
+  stu: Student,
+  allSeats: SeatNode[],
+  roster: Student[]
+): boolean {
+  for (const neighbor of getAdjacentSeats(seat, allSeats)) {
+    if (neighbor.studentId === null || !neighbor.studentClassId) continue;
+    const other = roster.find(s => s.classId === neighbor.studentClassId && s.id === neighbor.studentId);
+    if (other && areSeparated(stu, other)) return true;
+  }
+  return false;
+}
+
+function hasMixedTypePair(stu: Student, roster: Student[]): boolean {
+  return (stu.props.common.customPairs || []).some(pid => {
+    const partner = roster.find(s => s.classId === stu.classId && s.id === pid);
+    return partner && partner.defaultPref !== stu.defaultPref;
+  });
+}
+
+/** グループ島の外側（①と隣接しうる）席か */
+function isGroupPerimeterSeat(seat: SeatNode, groupId: string, allSeats: SeatNode[]): boolean {
+  return getAdjacentSeats(seat, allSeats).some(n =>
+    !n.isInactive && (n.studentId === null || n.groupId !== groupId)
+  );
+}
+
 /**
  * 最適化席替えメインエンジン
- * 優先度: 固定席 > ペア/同グループ・隣接 > エアコン回避 > 最新アーカイブとの座席非重複
+ * 優先度: 固定席 > ペア/同グループ・隣接 > 隣り合わせ回避 > エアコン回避 > 最新アーカイブとの座席非重複
  */
 export function generateOptimizedSeatingChart(
   students: Student[],
@@ -515,6 +555,9 @@ export function generateOptimizedSeatingChart(
     const free = seats.filter(s => s.studentId === null);
     if (free.length === 0) return undefined;
     free.sort((a, b) => {
+      const aSep = wouldViolateSeparation(a, stu, grid.flat(), activeStudents) ? 1 : 0;
+      const bSep = wouldViolateSeparation(b, stu, grid.flat(), activeStudents) ? 1 : 0;
+      if (aSep !== bSep) return aSep - bSep;
       const aHit = prev === a.seatIndex ? 1 : 0;
       const bHit = prev === b.seatIndex ? 1 : 0;
       if (aHit !== bHit) return aHit - bHit;
@@ -668,7 +711,7 @@ export function generateOptimizedSeatingChart(
     }
   }
 
-  // 座席割当（アーカイブ重複を避ける並びを優先）
+  // 座席割当（アーカイブ重複を避ける並びを優先。①隣接希望の②は島の外周席へ）
   for (const g of groupsData) {
     if (g.targetSeats.length === 0) continue;
     g.targetSeats.forEach(s => { s.groupId = g.pat.id; });
@@ -676,7 +719,15 @@ export function generateOptimizedSeatingChart(
     const seatsLeft = [...g.targetSeats];
     for (let j = 0; j < g.assigned.length; j++) {
       const stu = g.assigned[j];
-      const seat = preferSeat(stu, seatsLeft);
+      const pool = [...seatsLeft];
+      if (hasMixedTypePair(stu, activeStudents)) {
+        pool.sort((a, b) => {
+          const aPerim = isGroupPerimeterSeat(a, g.pat.id, grid.flat()) ? 0 : 1;
+          const bPerim = isGroupPerimeterSeat(b, g.pat.id, grid.flat()) ? 0 : 1;
+          return aPerim - bPerim;
+        });
+      }
+      const seat = preferSeat(stu, pool);
       if (!seat) break;
       seat.studentId = stu.id;
       seat.studentClassId = stu.classId;
@@ -724,6 +775,29 @@ export function generateOptimizedSeatingChart(
     ...shuffle(normalFocus),
     ...shuffle(frontWishers)
   ];
+
+  // 【ステップ2-0】: ①②混合ペアの物理隣接（②配置済みの隣に①を置く）
+  for (const stu of shuffle([...remainingFocusStudents])) {
+    if (isPlaced(stu)) continue;
+    for (const pairId of stu.props.common.customPairs || []) {
+      const partner = activeStudents.find(s => s.classId === stu.classId && s.id === pairId);
+      if (!partner || partner.defaultPref === stu.defaultPref) continue;
+      const partnerSeat = grid.flat().find(s =>
+        s.studentClassId === partner.classId && s.studentId === partner.id
+      );
+      if (!partnerSeat) continue;
+      const adjCandidates = emptySeatsForFocus.filter(s =>
+        s.studentId === null && isAdjacent(s, partnerSeat)
+      );
+      const adjSeat = preferSeat(stu, adjCandidates);
+      if (adjSeat) {
+        adjSeat.studentId = stu.id;
+        adjSeat.studentClassId = stu.classId;
+        adjSeat.role = 'focus';
+        break;
+      }
+    }
+  }
 
   // 【ステップ2-1】: ①と②の境界隣接（複数人クラスタを②側の島に隣接成長）
   const focusPairClusters = allPairClusters
@@ -816,7 +890,7 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ4: エアコン回避スワップ（ペア・固定より低優先だがアーカイブ回避より高優先）
+  // ★ ステップ3.5: 隣り合わせ回避のスワップ修正
   // ==========================================
   const swapStudents = (a: SeatNode, b: SeatNode) => {
     const tempId = a.studentId;
@@ -843,7 +917,6 @@ export function generateOptimizedSeatingChart(
         if (!partnerSeat) continue;
         if (isAdjacent(from, partnerSeat) && !isAdjacent(to, partnerSeat)) return true;
       }
-      // ②同士は同 groupId 維持もペア相当として守る
       if (from.groupId && to.groupId && from.groupId !== to.groupId) {
         const cluster = allPairClusters.find(c =>
           c.some(x => x.classId === stu.classId && x.id === stu.id)
@@ -854,6 +927,54 @@ export function generateOptimizedSeatingChart(
     return false;
   };
 
+  const hasSeparationViolation = (seat: SeatNode): boolean => {
+    if (seat.studentId === null || !seat.studentClassId || seat.isInactive) return false;
+    const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
+    if (!stu || isFixedStudent(stu)) return false;
+    return wouldViolateSeparation(seat, stu, grid.flat(), activeStudents);
+  };
+
+  let sepFixed = true;
+  while (sepFixed) {
+    sepFixed = false;
+    const occupied = grid.flat().filter(s => !s.isInactive && s.studentId !== null);
+    for (const seat of occupied) {
+      if (!hasSeparationViolation(seat)) continue;
+      const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
+      if (!stu || isFixedStudent(stu)) continue;
+
+      const swapTarget = occupied.find(target => {
+        if (target.seatIndex === seat.seatIndex || target.studentId === null) return false;
+        const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
+        if (!other || isFixedStudent(other)) return false;
+        if (wouldBreakPairAdjacency(seat, target)) return false;
+        const aId = seat.studentId;
+        const aClass = seat.studentClassId;
+        const bId = target.studentId;
+        const bClass = target.studentClassId;
+        seat.studentId = bId;
+        seat.studentClassId = bClass;
+        target.studentId = aId;
+        target.studentClassId = aClass;
+        const ok = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
+        seat.studentId = aId;
+        seat.studentClassId = aClass;
+        target.studentId = bId;
+        target.studentClassId = bClass;
+        return ok;
+      });
+
+      if (swapTarget) {
+        swapStudents(seat, swapTarget);
+        sepFixed = true;
+        break;
+      }
+    }
+  }
+
+  // ==========================================
+  // ★ ステップ4: エアコン回避スワップ（ペア・固定より低優先だがアーカイブ回避より高優先）
+  // ==========================================
   grid.flat().forEach(seat => {
     if (seat.isAC_Zone && seat.studentId !== null) {
       const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
@@ -892,6 +1013,19 @@ export function generateOptimizedSeatingChart(
         if (other.props.common.avoidAC && seat.isAC_Zone) return false;
         // ペア隣接を壊さない
         if (wouldBreakPairAdjacency(seat, target)) return false;
+        // 隣り合わせ回避を壊さない
+        const aId = seat.studentId;
+        const aClass = seat.studentClassId;
+        seat.studentId = target.studentId;
+        seat.studentClassId = target.studentClassId;
+        target.studentId = aId;
+        target.studentClassId = aClass;
+        const sepOk = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
+        target.studentId = seat.studentId;
+        target.studentClassId = seat.studentClassId;
+        seat.studentId = aId;
+        seat.studentClassId = aClass;
+        if (!sepOk) return false;
         // 相手が自分の前座席に行くのも避ける（相互に改善）
         const otherPrev = previousSeatMap.get(studentKey(other.classId, other.id));
         if (otherPrev === seat.seatIndex) return false;
