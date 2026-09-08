@@ -115,12 +115,21 @@ export default function Home() {
       }
     }
 
-    // 対象クラスを含むアーカイブのうち、最も新しいものを非重複参照に使う
-    const relevantArchives = archives.filter(a =>
-      classesToProcess.every(c => a.targetClasses.includes(c)) &&
-      a.lessonType === (isCombined ? 'combined' : 'normal')
-    );
-    const newestArchive = relevantArchives[0]; // 保存時に先頭追加のため [0] が最新
+    // 対象クラスを含む最新アーカイブを非重複参照に使う（id=保存時刻の降順）
+    const lessonType = isCombined ? 'combined' : 'normal';
+    const sortedArchives = [...archives].sort((a, b) => Number(b.id) - Number(a.id));
+    const newestArchive =
+      sortedArchives.find(a =>
+        a.lessonType === lessonType &&
+        classesToProcess.every(c => a.targetClasses.includes(c))
+      ) ||
+      sortedArchives.find(a =>
+        a.lessonType === lessonType &&
+        classesToProcess.some(c => a.targetClasses.includes(c))
+      ) ||
+      sortedArchives.find(a =>
+        classesToProcess.every(c => a.targetClasses.includes(c))
+      );
 
     const generatedSeats = generateOptimizedSeatingChart(
       targetStudents,
@@ -139,15 +148,21 @@ export default function Home() {
       ? `${targetClassesList.join('・')} 合同座席表 (${new Date().toLocaleDateString('ja-JP')})`
       : `${currentClass} 通常座席表 (${new Date().toLocaleDateString('ja-JP')})`;
 
+    const archiveTargetClasses = isCombinedMode ? targetClassesList : [currentClass];
+    // 対象クラスに属する欠席者だけをアーカイブに保存
+    const archiveAbsenteeIds = absenteeIds.filter(key =>
+      archiveTargetClasses.some(c => key.startsWith(`${c}-`))
+    );
+
     const newArchive: SeatingArchive = {
       id: Date.now().toString(),
       title,
       date: new Date().toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
       lessonType: isCombinedMode ? 'combined' : 'normal',
-      targetClasses: isCombinedMode ? targetClassesList : [currentClass],
+      targetClasses: archiveTargetClasses,
       seatingFunctionLatex: currentFunc?.latexString || 'f(n) = 3n + 5',
       seats: seats,
-      absenteeIds: absenteeIds,
+      absenteeIds: archiveAbsenteeIds,
     };
 
     setArchives(prev => [newArchive, ...prev]);

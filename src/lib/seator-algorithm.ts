@@ -488,18 +488,30 @@ function getAdjacentSeats(seat: SeatNode, allSeats: SeatNode[]): SeatNode[] {
   return allSeats.filter(s => !s.isInactive && isAdjacent(seat, s));
 }
 
+/** 隣席 or 同一グループ島に回避対象がいるか */
 function wouldViolateSeparation(
   seat: SeatNode,
   stu: Student,
   allSeats: SeatNode[],
   roster: Student[]
 ): boolean {
-  for (const neighbor of getAdjacentSeats(seat, allSeats)) {
-    if (neighbor.studentId === null || !neighbor.studentClassId) continue;
-    const other = roster.find(s => s.classId === neighbor.studentClassId && s.id === neighbor.studentId);
-    if (other && areSeparated(stu, other)) return true;
+  for (const otherSeat of allSeats) {
+    if (otherSeat.seatIndex === seat.seatIndex) continue;
+    if (otherSeat.isInactive || otherSeat.studentId === null || !otherSeat.studentClassId) continue;
+    const other = roster.find(s => s.classId === otherSeat.studentClassId && s.id === otherSeat.studentId);
+    if (!other || !areSeparated(stu, other)) continue;
+
+    // 物理隣接を禁止
+    if (isAdjacent(seat, otherSeat)) return true;
+    // 同一グループ島も禁止（両方に groupId がある場合）
+    if (seat.groupId && otherSeat.groupId && seat.groupId === otherSeat.groupId) return true;
   }
   return false;
+}
+
+/** 同じ島に回避対象が既にいるか */
+function hasSeparatedInAssigned(assigned: Student[], candidate: Student): boolean {
+  return assigned.some(a => areSeparated(a, candidate));
 }
 
 function hasMixedTypePair(stu: Student, roster: Student[]): boolean {
@@ -658,7 +670,7 @@ export function generateOptimizedSeatingChart(
     if (leaders[i]) groupsData[i].assigned.push(leaders[i]);
   }
 
-  /** 島へペアクラスタ全員を可能な限り引き込む */
+  /** 島へペアクラスタ全員を可能な限り引き込む（separateFrom は同島に入れない） */
   const pullClusterIntoGroup = (g: typeof groupsData[0], seed: Student) => {
     const capacity = g.targetSeats.length;
     const cluster = allPairClusters.find(c =>
@@ -670,6 +682,7 @@ export function generateOptimizedSeatingChart(
       added = false;
       for (let mi = members.length - 1; mi >= 0 && g.assigned.length < capacity; mi--) {
         const m = members[mi];
+        if (hasSeparatedInAssigned(g.assigned, m)) continue;
         const linkedToAssigned = g.assigned.some(a => arePaired(a, m));
         const inSameCluster = cluster?.some(c => c.classId === m.classId && c.id === m.id) ?? false;
         if (linkedToAssigned || inSameCluster) {
@@ -684,26 +697,33 @@ export function generateOptimizedSeatingChart(
     if (g.assigned[0]) pullClusterIntoGroup(g, g.assigned[0]);
   }
 
-  // 残メンバー配置（複数人クラスタをまとめて同じ島へ）
+  // 残メンバー配置（複数人クラスタをまとめて同じ島へ／回避対象は同島に入れない）
   for (const g of groupsData) {
     const capacity = g.targetSeats.length;
     while (g.assigned.length < capacity && members.length > 0) {
-      // 残容量に収まる最大クラスタを優先
       const free = capacity - g.assigned.length;
-      let bestIdx = 0;
-      let bestSize = 1;
+      let bestIdx = -1;
+      let bestSize = 0;
       for (let mi = 0; mi < members.length; mi++) {
         const m = members[mi];
+        if (hasSeparatedInAssigned(g.assigned, m)) continue;
         const cluster = allPairClusters.find(c =>
           c.some(x => x.classId === m.classId && x.id === m.id)
         );
         const pendingInCluster = cluster
-          ? cluster.filter(c => members.some(x => x.classId === c.classId && x.id === c.id)).length
+          ? cluster.filter(c =>
+              members.some(x => x.classId === c.classId && x.id === c.id) &&
+              !hasSeparatedInAssigned(g.assigned, c)
+            ).length
           : 1;
-        if (pendingInCluster <= free && pendingInCluster > bestSize) {
+        if (pendingInCluster > 0 && pendingInCluster <= free && pendingInCluster > bestSize) {
           bestSize = pendingInCluster;
           bestIdx = mi;
         }
+      }
+      if (bestIdx === -1) {
+        // 回避制約で誰も入れない場合は次の島へ
+        break;
       }
       const member = members.splice(bestIdx, 1)[0];
       g.assigned.push(member);
@@ -748,7 +768,8 @@ export function generateOptimizedSeatingChart(
     seat.studentId = member.id;
     seat.studentClassId = member.classId;
     seat.role = 'member';
-    seat.groupId = 'Group-Extra';
+    // 余り席は個別の島扱い（separateFrom の同一グループ判定を誤って共有しない）
+    seat.groupId = `Group-Extra-${member.classId}-${member.id}`;
   }
 
   // ==========================================
@@ -890,7 +911,7 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ3.5: 隣り合わせ回避のスワップ修正
+  // ★ ステップ3.5: 隣り合わせ・同一グループ回避のスワップ修正
   // ==========================================
   const swapStudents = (a: SeatNode, b: SeatNode) => {
     const tempId = a.studentId;
@@ -904,7 +925,7 @@ export function generateOptimizedSeatingChart(
     b.role = tempRole;
   };
 
-  /** スワップ後にペア隣接が壊れるか */
+  /** スワップ後にペア隣接が壊れるか（同一グループ島の維持も含む） */
   const wouldBreakPairAdjacency = (seatA: SeatNode, seatB: SeatNode): boolean => {
     for (const from of [seatA, seatB]) {
       const to = from === seatA ? seatB : seatA;
@@ -916,12 +937,15 @@ export function generateOptimizedSeatingChart(
         const partnerSeat = grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === pid);
         if (!partnerSeat) continue;
         if (isAdjacent(from, partnerSeat) && !isAdjacent(to, partnerSeat)) return true;
-      }
-      if (from.groupId && to.groupId && from.groupId !== to.groupId) {
-        const cluster = allPairClusters.find(c =>
-          c.some(x => x.classId === stu.classId && x.id === stu.id)
-        );
-        if (cluster && cluster.length >= 2) return true;
+        // ②同士で同じ島にいるペアは、島を跨ぐスワップを禁止
+        if (
+          from.groupId &&
+          partnerSeat.groupId &&
+          from.groupId === partnerSeat.groupId &&
+          to.groupId !== from.groupId
+        ) {
+          return true;
+        }
       }
     }
     return false;
@@ -934,35 +958,52 @@ export function generateOptimizedSeatingChart(
     return wouldViolateSeparation(seat, stu, grid.flat(), activeStudents);
   };
 
+  const trySeparationSwap = (seat: SeatNode, target: SeatNode): boolean => {
+    if (target.seatIndex === seat.seatIndex || target.studentId === null) return false;
+    const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
+    if (!other || isFixedStudent(other)) return false;
+    if (wouldBreakPairAdjacency(seat, target)) return false;
+
+    const aId = seat.studentId;
+    const aClass = seat.studentClassId;
+    const aRole = seat.role;
+    const bId = target.studentId;
+    const bClass = target.studentClassId;
+    const bRole = target.role;
+
+    seat.studentId = bId;
+    seat.studentClassId = bClass;
+    seat.role = bRole;
+    target.studentId = aId;
+    target.studentClassId = aClass;
+    target.role = aRole;
+    const ok = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
+    seat.studentId = aId;
+    seat.studentClassId = aClass;
+    seat.role = aRole;
+    target.studentId = bId;
+    target.studentClassId = bClass;
+    target.role = bRole;
+    return ok;
+  };
+
+  let sepPasses = 0;
   let sepFixed = true;
-  while (sepFixed) {
+  while (sepFixed && sepPasses < 40) {
     sepFixed = false;
+    sepPasses++;
     const occupied = grid.flat().filter(s => !s.isInactive && s.studentId !== null);
     for (const seat of occupied) {
       if (!hasSeparationViolation(seat)) continue;
       const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
       if (!stu || isFixedStudent(stu)) continue;
 
-      const swapTarget = occupied.find(target => {
-        if (target.seatIndex === seat.seatIndex || target.studentId === null) return false;
-        const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
-        if (!other || isFixedStudent(other)) return false;
-        if (wouldBreakPairAdjacency(seat, target)) return false;
-        const aId = seat.studentId;
-        const aClass = seat.studentClassId;
-        const bId = target.studentId;
-        const bClass = target.studentClassId;
-        seat.studentId = bId;
-        seat.studentClassId = bClass;
-        target.studentId = aId;
-        target.studentClassId = aClass;
-        const ok = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
-        seat.studentId = aId;
-        seat.studentClassId = aClass;
-        target.studentId = bId;
-        target.studentClassId = bClass;
-        return ok;
-      });
+      // 同ロール優先 → それでもダメなら異ロールも試す
+      const candidates = [
+        ...occupied.filter(t => t.role === seat.role),
+        ...occupied.filter(t => t.role !== seat.role),
+      ];
+      const swapTarget = candidates.find(target => trySeparationSwap(seat, target));
 
       if (swapTarget) {
         swapStudents(seat, swapTarget);
@@ -973,7 +1014,7 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ4: エアコン回避スワップ（ペア・固定より低優先だがアーカイブ回避より高優先）
+  // ★ ステップ4: エアコン回避スワップ
   // ==========================================
   grid.flat().forEach(seat => {
     if (seat.isAC_Zone && seat.studentId !== null) {
@@ -984,7 +1025,25 @@ export function generateOptimizedSeatingChart(
           if (target.role !== seat.role || target.seatIndex === seat.seatIndex) return false;
           const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
           if (!other || isFixedStudent(other) || other.props.common.avoidAC) return false;
-          return !wouldBreakPairAdjacency(seat, target);
+          if (wouldBreakPairAdjacency(seat, target)) return false;
+          // スワップ後に隣回避が壊れないか
+          const aId = seat.studentId;
+          const aClass = seat.studentClassId;
+          const aRole = seat.role;
+          seat.studentId = target.studentId;
+          seat.studentClassId = target.studentClassId;
+          seat.role = target.role;
+          target.studentId = aId;
+          target.studentClassId = aClass;
+          target.role = aRole;
+          const ok = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
+          target.studentId = seat.studentId;
+          target.studentClassId = seat.studentClassId;
+          target.role = seat.role;
+          seat.studentId = aId;
+          seat.studentClassId = aClass;
+          seat.role = aRole;
+          return ok;
         });
 
         if (safeSeat) swapStudents(seat, safeSeat);
@@ -994,47 +1053,84 @@ export function generateOptimizedSeatingChart(
 
   // ==========================================
   // ★ ステップ5: 最新アーカイブとの座席非重複スワップ（最低優先度）
+  // 固定席・ペア・隣回避・エアコン回避を壊さない範囲で、前回と同じ席を避ける
   // ==========================================
   if (previousSeatMap.size > 0) {
-    const occupied = grid.flat().filter(s => !s.isInactive && s.studentId !== null);
-    for (const seat of occupied) {
+    const isOnPreviousSeat = (seat: SeatNode): boolean => {
+      if (seat.studentId === null || !seat.studentClassId) return false;
+      const prev = previousSeatMap.get(studentKey(seat.studentClassId, seat.studentId));
+      return prev !== undefined && prev === seat.seatIndex;
+    };
+
+    const tryArchiveSwap = (seat: SeatNode, target: SeatNode): boolean => {
+      if (target.seatIndex === seat.seatIndex || target.studentId === null || target.isInactive) return false;
       const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
-      if (!stu || isFixedStudent(stu)) continue;
-      const prevIdx = previousSeatMap.get(studentKey(stu.classId, stu.id));
-      if (prevIdx === undefined || seat.seatIndex !== prevIdx) continue;
+      const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
+      if (!stu || !other || isFixedStudent(stu) || isFixedStudent(other)) return false;
+      if (wouldBreakPairAdjacency(seat, target)) return false;
+      if (stu.props.common.avoidAC && target.isAC_Zone) return false;
+      if (other.props.common.avoidAC && seat.isAC_Zone) return false;
 
-      const swapTarget = occupied.find(target => {
-        if (target.seatIndex === seat.seatIndex) return false;
-        if (target.role !== seat.role) return false;
-        const other = activeStudents.find(s => s.classId === target.studentClassId && s.id === target.studentId);
-        if (!other || isFixedStudent(other)) return false;
-        // エアコン回避を壊さない
-        if (stu.props.common.avoidAC && target.isAC_Zone) return false;
-        if (other.props.common.avoidAC && seat.isAC_Zone) return false;
-        // ペア隣接を壊さない
-        if (wouldBreakPairAdjacency(seat, target)) return false;
-        // 隣り合わせ回避を壊さない
-        const aId = seat.studentId;
-        const aClass = seat.studentClassId;
-        seat.studentId = target.studentId;
-        seat.studentClassId = target.studentClassId;
-        target.studentId = aId;
-        target.studentClassId = aClass;
-        const sepOk = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
-        target.studentId = seat.studentId;
-        target.studentClassId = seat.studentClassId;
-        seat.studentId = aId;
-        seat.studentClassId = aClass;
-        if (!sepOk) return false;
-        // 相手が自分の前座席に行くのも避ける（相互に改善）
-        const otherPrev = previousSeatMap.get(studentKey(other.classId, other.id));
-        if (otherPrev === seat.seatIndex) return false;
-        // 同じグループ島内、または①同士なら許可
-        if (seat.groupId && target.groupId && seat.groupId !== target.groupId) return false;
-        return true;
-      });
+      const aId = seat.studentId;
+      const aClass = seat.studentClassId;
+      const aRole = seat.role;
+      const bId = target.studentId;
+      const bClass = target.studentClassId;
+      const bRole = target.role;
 
-      if (swapTarget) swapStudents(seat, swapTarget);
+      seat.studentId = bId;
+      seat.studentClassId = bClass;
+      seat.role = bRole;
+      target.studentId = aId;
+      target.studentClassId = aClass;
+      target.role = aRole;
+
+      const sepOk = !hasSeparationViolation(seat) && !hasSeparationViolation(target);
+      // スワップ後、少なくとも seat 側の生徒（移動先=target）が前回席でなくなること
+      const movedOffPrev = !isOnPreviousSeat(target);
+      // 相手が今回の席＝相手の前回席、にならないこと（相互悪化を防ぐ）
+      const otherNotWorse = !isOnPreviousSeat(seat);
+
+      seat.studentId = aId;
+      seat.studentClassId = aClass;
+      seat.role = aRole;
+      target.studentId = bId;
+      target.studentClassId = bClass;
+      target.role = bRole;
+
+      return sepOk && movedOffPrev && otherNotWorse;
+    };
+
+    let archivePasses = 0;
+    let archiveFixed = true;
+    while (archiveFixed && archivePasses < 60) {
+      archiveFixed = false;
+      archivePasses++;
+      const occupied = grid.flat().filter(s => !s.isInactive && s.studentId !== null);
+
+      for (const seat of occupied) {
+        if (!isOnPreviousSeat(seat)) continue;
+        const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
+        if (!stu || isFixedStudent(stu)) continue;
+
+        // 1) 同ロール・同グループ島内
+        // 2) 同ロール全体
+        // 3) 任意ロール（最終手段）
+        const sameGroup = occupied.filter(t =>
+          t.role === seat.role &&
+          ((seat.groupId && t.groupId === seat.groupId) || (!seat.groupId && !t.groupId))
+        );
+        const sameRole = occupied.filter(t => t.role === seat.role && !sameGroup.includes(t));
+        const otherRole = occupied.filter(t => t.role !== seat.role);
+        const candidates = [...sameGroup, ...sameRole, ...otherRole];
+
+        const swapTarget = candidates.find(target => tryArchiveSwap(seat, target));
+        if (swapTarget) {
+          swapStudents(seat, swapTarget);
+          archiveFixed = true;
+          break;
+        }
+      }
     }
   }
 

@@ -70,6 +70,13 @@ export default function TabStudents({
 
   const relevantArchives = archives.filter(a => a.targetClasses.includes(currentClass));
 
+  /** アーカイブ表示用: 対象クラスに属する欠席者数のみ数える */
+  const countArchiveAbsentees = (arch: SeatingArchive): number => {
+    return (arch.absenteeIds || []).filter(key =>
+      arch.targetClasses.some(c => key === `${c}` || key.startsWith(`${c}-`))
+    ).length;
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -375,7 +382,7 @@ export default function TabStudents({
                             {stu.props.whenType1.preferFrontRow && '⬆️前列希望 '}
                             {stu.props.whenType1.preferBackRow && '⬇️後列希望 '}
                             {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${stu.props.common.customPairs.join(',')}) `}
-                            {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣回避(${stu.props.common.separateFrom.join(',')}) `}
+                            {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣/同G回避(${stu.props.common.separateFrom.join(',')}) `}
                           </span>
                         </td>
                       </tr>
@@ -466,7 +473,7 @@ export default function TabStudents({
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🚫 隣り合わせ回避(番号):</span>
+                                  <span className="shrink-0 mr-2">🚫 隣・同一グループ回避(番号):</span>
                                   <input
                                     type="text"
                                     value={separateStr}
@@ -654,7 +661,7 @@ export default function TabStudents({
                         <span className="font-extrabold text-sm text-slate-800">{arch.title}</span>
                       </div>
                       <p className="text-xs text-slate-500 font-bold">
-                        保存日時: {arch.date} / 対象クラス: [ {arch.targetClasses.join(', ')} ] / 欠席者: {arch.absenteeIds.length}名
+                        保存日時: {arch.date} / 対象クラス: [ {arch.targetClasses.join(', ')} ] / 欠席者: {countArchiveAbsentees(arch)}名
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
