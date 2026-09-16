@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive } from '@/types';
-import { parseExcelData, ImportMode } from '@/lib/excel-parser';
+import { parseExcelData, parseExcelScoreFiles, ImportMode, ScoreGradeYear } from '@/lib/excel-parser';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
@@ -44,6 +44,9 @@ export default function TabStudents({
   const [openStudentId, setOpenStudentId] = useState<number | null>(null);
   const [selectedArchive, setSelectedArchive] = useState<SeatingArchive | null>(null);
   const [importMode, setImportMode] = useState<ImportMode>('seat-pref');
+  const [scoreGradeYear, setScoreGradeYear] = useState<ScoreGradeYear>(
+    () => (Number(currentClass.split('-')[0]) as ScoreGradeYear) || 2
+  );
 
   const maxNum = getMaxStudents(currentClass);
 
@@ -78,13 +81,15 @@ export default function TabStudents({
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const result = await parseExcelData(file, currentClass, importMode, students);
-      onUpdateStudents(result.students);
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
 
+    try {
       if (importMode === 'seat-pref') {
+        const result = await parseExcelData(files[0], currentClass, importMode, students);
+        onUpdateStudents(result.students);
+
         const summary = result.seatPrefImport;
         if (!summary || summary.count === 0) {
           alert(
@@ -107,9 +112,33 @@ export default function TabStudents({
           );
         }
       } else {
-        alert('Excelファイルから成績スコア（旧形式）をインポートし、既存データと統合・保存しました！');
+        const result = await parseExcelScoreFiles(files, scoreGradeYear, students, currentClass);
+        onUpdateStudents(result.students);
+
+        const summary = result.scoreImport;
+        if (!summary || summary.count === 0) {
+          alert(
+            '成績データが見つかりませんでした。\n' +
+            '「学籍順」シートに学籍番号・合計点があるファイルか、旧形式の成績ファイルを確認してください。'
+          );
+        } else if (summary.format === 'gakuseki') {
+          alert(
+            `成績（合計点）をインポートしました！\n\n` +
+            `学年補完: ${summary.gradeYear}年生（学籍番号の先頭桁）\n` +
+            `ファイル数: ${summary.fileCount}（複数時は自動合計）\n` +
+            `反映: ${summary.count}名\n` +
+            `対象クラス: ${summary.classes.join(', ')}\n\n` +
+            `${summary.fileNames.map(n => `・${n}`).join('\n')}`
+          );
+        } else {
+          alert(
+            `旧形式の成績ファイルをインポートしました！\n` +
+            `反映: ${summary.count}名 / 対象: ${summary.classes.join(', ') || '—'}`
+          );
+        }
       }
     } catch (err) {
+      console.error(err);
       alert('Excelの読み込みに失敗しました。ファイルの形式を確認してください。');
     } finally {
       e.target.value = '';
@@ -330,13 +359,49 @@ export default function TabStudents({
                     importMode === 'score' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  <span>📊 旧形式 (成績入力)</span>
+                  <span>📊 成績入力</span>
                 </button>
               </div>
 
+              {importMode === 'score' && (
+                <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-xl text-xs font-black text-amber-900">
+                  <span className="shrink-0">学年補完:</span>
+                  {([1, 2, 3] as ScoreGradeYear[]).map(y => (
+                    <label
+                      key={y}
+                      className={`flex items-center gap-1 px-2 py-1 rounded-lg cursor-pointer transition ${
+                        scoreGradeYear === y ? 'bg-amber-500 text-white shadow-sm' : 'bg-white text-amber-800 hover:bg-amber-100'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="scoreGradeYear"
+                        checked={scoreGradeYear === y}
+                        onChange={() => setScoreGradeYear(y)}
+                        className="sr-only"
+                      />
+                      <span>{y}年</span>
+                    </label>
+                  ))}
+                  <span className="text-[10px] font-bold text-amber-700 ml-1 hidden sm:inline">
+                    ※学籍番号が「501」形式のとき先頭学年を補います
+                  </span>
+                </div>
+              )}
+
               <label className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-4 py-2 rounded-xl text-xs cursor-pointer shadow transition flex items-center gap-1.5 shrink-0">
-                <span>📂 {importMode === 'seat-pref' ? '新形式で希望をインポート' : '旧形式で成績をインポート'}</span>
-                <input type="file" accept=".xlsx,.xlsm,.xls" onChange={handleFileUpload} className="hidden" />
+                <span>
+                  {importMode === 'seat-pref'
+                    ? '📂 新形式で希望をインポート'
+                    : '📂 成績ファイルをインポート（複数可）'}
+                </span>
+                <input
+                  type="file"
+                  accept=".xlsx,.xlsm,.xls"
+                  multiple={importMode === 'score'}
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
               </label>
             </div>
           </div>

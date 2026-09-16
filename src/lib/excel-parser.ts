@@ -11,10 +11,22 @@ export type SeatPrefImportSummary = {
   sheetName: string;
 };
 
+export type ScoreImportSummary = {
+  count: number;
+  classes: ClassId[];
+  fileCount: number;
+  fileNames: string[];
+  gradeYear: 1 | 2 | 3;
+  format: 'gakuseki' | 'legacy';
+};
+
 export type ParseExcelResult = {
   students: Student[];
   seatPrefImport?: SeatPrefImportSummary;
+  scoreImport?: ScoreImportSummary;
 };
+
+export type ScoreGradeYear = 1 | 2 | 3;
 
 /** デフォルト列: F=5, J=9 (Microsoft Forms ふりかえり形式) */
 const DEFAULT_ID_COL = 5;
@@ -143,6 +155,217 @@ function upsertStudentPref(
       props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
     });
   }
+}
+
+function upsertStudentScore(
+  studentsMap: Map<string, Student>,
+  classId: ClassId,
+  exID: number,
+  score: number,
+  replaceScore: boolean
+): void {
+  const key = `${classId}-${exID}`;
+  const existing = studentsMap.get(key);
+  if (existing) {
+    studentsMap.set(key, {
+      ...existing,
+      score: replaceScore ? score : (existing.score || 0) + score,
+    });
+  } else {
+    studentsMap.set(key, {
+      id: exID,
+      classId,
+      name: `${classId} ${exID}番`,
+      defaultPref: 2,
+      score,
+      props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
+    });
+  }
+}
+
+/** 3桁学籍番号（先頭学年省略）: 501 → 学年Xの5組1番 */
+function parseShortGakusekiId(
+  raw: unknown,
+  gradeYear: ScoreGradeYear
+): { classId: ClassId; exID: number } | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const str = String(raw).trim();
+  if (!str || /学籍|番号|氏名/.test(str)) return null;
+
+  const num = Number(str);
+  if (isNaN(num)) return null;
+
+  // すでに4桁なら学年込みとして解釈
+  if (num >= 1000 && num <= 3999) {
+    const exID = num % 100;
+    const classNum = Math.floor((num % 1000) / 100);
+    const gradeNum = Math.floor(num / 1000);
+    if (exID >= 1 && exID <= 40 && classNum >= 1 && classNum <= 5 && gradeNum >= 1 && gradeNum <= 3) {
+      return { classId: `${gradeNum}-${classNum}` as ClassId, exID };
+    }
+  }
+
+  // 3桁形式: 組(1桁) + 出席番号(2桁) ※学年は UI で補完
+  if (num >= 101 && num <= 540) {
+    const exID = num % 100;
+    const classNum = Math.floor(num / 100);
+    if (exID >= 1 && exID <= 40 && classNum >= 1 && classNum <= 5) {
+      return { classId: `${gradeYear}-${classNum}` as ClassId, exID };
+    }
+  }
+
+  return null;
+}
+
+/** 「学籍順」シートの合計列を検出（合計100 / 合計 など） */
+function detectGakusekiScoreLayout(rawData: unknown[][]): {
+  idCol: number;
+  scoreCol: number;
+  dataStartRow: number;
+} | null {
+  for (let rowIdx = 0; rowIdx < Math.min(5, rawData.length); rowIdx++) {
+    const row = rawData[rowIdx] || [];
+    let idCol = -1;
+    let scoreCol = -1;
+    for (let colIdx = 0; colIdx < row.length; colIdx++) {
+      const cell = String(row[colIdx] ?? '').trim();
+      if (/学籍番号/.test(cell)) idCol = colIdx;
+      if (/^合計/.test(cell) || cell === '合計100') scoreCol = colIdx;
+    }
+    if (idCol !== -1 && scoreCol !== -1) {
+      return { idCol, scoreCol, dataStartRow: rowIdx + 1 };
+    }
+  }
+  return null;
+}
+
+function pickGakusekiSheet(workbook: XLSX.WorkBook): { sheetName: string; worksheet: XLSX.WorkSheet } | null {
+  if (workbook.SheetNames.includes('学籍順')) {
+    return { sheetName: '学籍順', worksheet: workbook.Sheets['学籍順'] };
+  }
+  for (const name of workbook.SheetNames) {
+    const ws = workbook.Sheets[name];
+    const preview: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    if (detectGakusekiScoreLayout(preview)) {
+      return { sheetName: name, worksheet: ws };
+    }
+  }
+  return null;
+}
+
+function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+/** 1ファイルから学籍順形式の素点を抽出（数値がある行のみ） */
+function extractGakusekiScores(
+  workbook: XLSX.WorkBook,
+  gradeYear: ScoreGradeYear
+): Map<string, number> {
+  const scores = new Map<string, number>();
+  const picked = pickGakusekiSheet(workbook);
+  if (!picked) return scores;
+
+  const rawData: unknown[][] = XLSX.utils.sheet_to_json(picked.worksheet, { header: 1, defval: '' });
+  const layout = detectGakusekiScoreLayout(rawData);
+  if (!layout) return scores;
+
+  for (let rowIdx = layout.dataStartRow; rowIdx < rawData.length; rowIdx++) {
+    const row = rawData[rowIdx] || [];
+    const parsed = parseShortGakusekiId(row[layout.idCol], gradeYear);
+    if (!parsed) continue;
+
+    const rawScore = row[layout.scoreCol];
+    if (rawScore === undefined || rawScore === null || rawScore === '') continue;
+    const score = Number(rawScore);
+    if (isNaN(score)) continue;
+
+    const key = `${parsed.classId}-${parsed.exID}`;
+    scores.set(key, score);
+  }
+  return scores;
+}
+
+/**
+ * 成績ファイル（複数可）を読み込み、合計点を既存データへ反映する。
+ * - 新形式: 「学籍順」シート / 学籍番号(3桁・学年省略) / 合計列
+ * - 複数ファイル: 同一生徒の素点を自動加算
+ * - 旧形式: 単一ファイル時のみ従来レイアウトへフォールバック
+ */
+export async function parseExcelScoreFiles(
+  files: File[],
+  gradeYear: ScoreGradeYear,
+  existingStudents: Student[],
+  currentClassId: ClassId
+): Promise<ParseExcelResult> {
+  if (files.length === 0) {
+    return { students: existingStudents };
+  }
+
+  const studentsMap = new Map<string, Student>();
+  existingStudents.forEach(s =>
+    studentsMap.set(`${s.classId}-${s.id}`, { ...s, props: { ...s.props, common: { ...s.props.common } } })
+  );
+
+  const totals = new Map<string, number>();
+  let gakusekiFileCount = 0;
+  const usedNames: string[] = [];
+
+  for (const file of files) {
+    const buffer = await readFileAsArrayBuffer(file);
+    const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+    const fileScores = extractGakusekiScores(workbook, gradeYear);
+
+    if (fileScores.size > 0) {
+      gakusekiFileCount++;
+      usedNames.push(file.name);
+      for (const [key, score] of fileScores) {
+        totals.set(key, (totals.get(key) || 0) + score);
+      }
+    }
+  }
+
+  if (gakusekiFileCount > 0) {
+    const affectedClasses = new Set<ClassId>();
+    for (const [key, score] of totals) {
+      const [grade, classNum, idStr] = key.split('-');
+      const classId = `${grade}-${classNum}` as ClassId;
+      const exID = Number(idStr);
+      upsertStudentScore(studentsMap, classId, exID, score, true);
+      affectedClasses.add(classId);
+    }
+
+    return {
+      students: Array.from(studentsMap.values()),
+      scoreImport: {
+        count: totals.size,
+        classes: [...affectedClasses].sort(),
+        fileCount: gakusekiFileCount,
+        fileNames: usedNames,
+        gradeYear,
+        format: 'gakuseki',
+      },
+    };
+  }
+
+  // 旧形式フォールバック（先頭ファイルのみ）
+  const legacy = await parseExcelData(files[0], currentClassId, 'score', existingStudents);
+  return {
+    ...legacy,
+    scoreImport: {
+      count: legacy.students.filter(s => s.score > 0).length,
+      classes: [...new Set(legacy.students.filter(s => s.score > 0).map(s => s.classId))].sort(),
+      fileCount: 1,
+      fileNames: [files[0].name],
+      gradeYear: Number(currentClassId.split('-')[0]) as ScoreGradeYear,
+      format: 'legacy',
+    },
+  };
 }
 
 /**
