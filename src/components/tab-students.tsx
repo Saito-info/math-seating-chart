@@ -14,6 +14,40 @@ function parseStudentNumberList(input: string, selfId: number): number[] {
     .filter(n => !isNaN(n) && n > 0 && n !== selfId);
 }
 
+/** 出席番号は入力中に確定せず、Enter でまとめて認識する */
+function NumberListInput({
+  value,
+  placeholder,
+  onCommit,
+}: {
+  value: string;
+  placeholder: string;
+  onCommit: (raw: string) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+
+  return (
+    <input
+      type="text"
+      value={draft ?? value}
+      placeholder={placeholder}
+      onChange={(e) => {
+        e.stopPropagation();
+        setDraft(e.target.value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        e.stopPropagation();
+        onCommit(draft ?? value);
+        setDraft(null);
+      }}
+      onClick={(e) => e.stopPropagation()}
+      className="w-full px-2 py-1 bg-indigo-950 border border-indigo-700 rounded text-white font-mono font-black outline-none focus:ring-1 focus:ring-indigo-400"
+    />
+  );
+}
+
 type Props = {
   students: Student[];
   onUpdateStudents: (students: Student[]) => void;
@@ -521,36 +555,30 @@ export default function TabStudents({
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🤝 隣接/同グループ(複数可・番号):</span>
-                                  <input
-                                    type="text"
+                                  <span className="shrink-0 mr-2">🤝 隣接/同グループ(Enterで確定):</span>
+                                  <NumberListInput
                                     value={pairsStr}
                                     placeholder="例: 3, 6, 12"
-                                    onChange={(e) => {
-                                      const nums = parseStudentNumberList(e.target.value, stu.id);
+                                    onCommit={(raw) => {
+                                      const nums = parseStudentNumberList(raw, stu.id);
                                       handleUpdateStudentProp(stu, {
                                         props: { ...stu.props, common: { ...stu.props.common, customPairs: nums } }
                                       });
                                     }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="w-full px-2 py-1 bg-indigo-950 border border-indigo-700 rounded text-white font-mono font-black outline-none focus:ring-1 focus:ring-indigo-400"
                                   />
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🚫 隣・同一グループ回避(番号):</span>
-                                  <input
-                                    type="text"
+                                  <span className="shrink-0 mr-2">🚫 隣・同一グループ回避(Enterで確定):</span>
+                                  <NumberListInput
                                     value={separateStr}
                                     placeholder="例: 3, 6"
-                                    onChange={(e) => {
-                                      const nums = parseStudentNumberList(e.target.value, stu.id);
+                                    onCommit={(raw) => {
+                                      const nums = parseStudentNumberList(raw, stu.id);
                                       handleUpdateStudentProp(stu, {
                                         props: { ...stu.props, common: { ...stu.props.common, separateFrom: nums } }
                                       });
                                     }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="w-full px-2 py-1 bg-indigo-950 border border-indigo-700 rounded text-white font-mono font-black outline-none focus:ring-1 focus:ring-indigo-400"
                                   />
                                 </div>
 

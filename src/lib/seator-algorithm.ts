@@ -797,9 +797,61 @@ export function generateOptimizedSeatingChart(
     ...shuffle(frontWishers)
   ];
 
+  // 【ステップ2-位置】: 前列・後列希望を隣接より先に確定する
+  // 希望側の空き席へ先に置き、その後の隣接配置では動かさない
+  const placeByPositionWish = (wishers: Student[], wish: 'front' | 'back') => {
+    const queue = shuffle(wishers).filter(s => !isPlaced(s));
+    for (const stu of queue) {
+      if (isPlaced(stu)) continue;
+      const seat = emptySeatsForFocus
+        .filter(s => s.studentId === null)
+        .sort((a, b) => {
+          if (a.row !== b.row) return wish === 'front' ? a.row - b.row : b.row - a.row;
+          return a.col - b.col;
+        })[0];
+      if (!seat) break;
+      seat.studentId = stu.id;
+      seat.studentClassId = stu.classId;
+      seat.role = 'focus';
+    }
+  };
+
+  placeByPositionWish(backWishers, 'back');
+  placeByPositionWish(frontWishers, 'front');
+
+  // 位置希望のないペア相手だけ、希望席の隣に置ける場合は置く（希望者本人は動かさない）
+  for (const stu of remainingFocusStudents) {
+    if (!isPlaced(stu)) continue;
+    const wish = stu.props.whenType1.preferFrontRow && !stu.props.whenType1.preferBackRow
+      ? 'front'
+      : stu.props.whenType1.preferBackRow && !stu.props.whenType1.preferFrontRow
+        ? 'back'
+        : null;
+    if (!wish) continue;
+    const anchor = grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === stu.id);
+    if (!anchor) continue;
+    const partners = remainingFocusStudents.filter(p =>
+      !isPlaced(p) &&
+      p.classId === stu.classId &&
+      arePaired(stu, p) &&
+      !(p.props.whenType1.preferFrontRow && !p.props.whenType1.preferBackRow) &&
+      !(p.props.whenType1.preferBackRow && !p.props.whenType1.preferFrontRow)
+    );
+    if (partners.length > 0) {
+      placeClusterAdjacentToSeats(partners, [anchor], emptySeatsForFocus, 'focus', previousSeatMap);
+    }
+  }
+
   // 【ステップ2-0】: ①②混合ペアの物理隣接（②配置済みの隣に①を置く）
+  // 位置希望のある①は既に希望席へ置いてあるので、ここでは動かさない
   for (const stu of shuffle([...remainingFocusStudents])) {
     if (isPlaced(stu)) continue;
+    if (
+      (stu.props.whenType1.preferFrontRow && !stu.props.whenType1.preferBackRow) ||
+      (stu.props.whenType1.preferBackRow && !stu.props.whenType1.preferFrontRow)
+    ) {
+      continue;
+    }
     for (const pairId of stu.props.common.customPairs || []) {
       const partner = activeStudents.find(s => s.classId === stu.classId && s.id === pairId);
       if (!partner || partner.defaultPref === stu.defaultPref) continue;
