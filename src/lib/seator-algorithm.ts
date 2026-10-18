@@ -430,10 +430,12 @@ function placeClusterAdjacentToSeats(
   anchorSeats: SeatNode[],
   emptyPool: SeatNode[],
   role: SeatNode['role'],
-  previousSeatMap: Map<string, number>
+  previousSeatMap: Map<string, number>,
+  options?: { requireAdjacent?: boolean }
 ): void {
   const remaining = [...cluster];
   const occupiedCluster = [...anchorSeats];
+  const requireAdjacent = options?.requireAdjacent ?? false;
 
   while (remaining.length > 0) {
     // 既存クラスタに隣接する空きを優先。アーカイブ重複席は後回し
@@ -444,11 +446,14 @@ function placeClusterAdjacentToSeats(
         const pref = previousSeatMap.get(studentKey(nextStu.classId, nextStu.id));
         const aHit = pref === a.seatIndex ? 1 : 0;
         const bHit = pref === b.seatIndex ? 1 : 0;
-        return aHit - bHit;
+        if (aHit !== bHit) return aHit - bHit;
+        // 隣接希望は座席番号の近い席を優先（遷移を小さく）
+        const anchorIdx = occupiedCluster[0]?.seatIndex ?? 0;
+        return Math.abs(a.seatIndex - anchorIdx) - Math.abs(b.seatIndex - anchorIdx);
       });
 
     let seat: SeatNode | undefined = candidates[0];
-    if (!seat) {
+    if (!seat && !requireAdjacent) {
       seat = emptyPool.find(s => s.studentId === null);
     }
     if (!seat) break;
@@ -459,6 +464,48 @@ function placeClusterAdjacentToSeats(
     seat.role = role;
     occupiedCluster.push(seat);
   }
+}
+
+function hasBackWish(stu: Student): boolean {
+  return !!(stu.props.whenType1.preferBackRow && !stu.props.whenType1.preferFrontRow);
+}
+
+function hasFrontWish(stu: Student): boolean {
+  return !!(stu.props.whenType1.preferFrontRow && !stu.props.whenType1.preferBackRow);
+}
+
+/** アンカー席を動かさず、未配置の隣接希望者だけを隣席へ置く */
+function placeAdjacentPartnersOfStudent(
+  anchor: Student,
+  roster: Student[],
+  gridFlat: SeatNode[],
+  emptyPool: SeatNode[],
+  previousSeatMap: Map<string, number>,
+  isPlaced: (stu: Student) => boolean
+): void {
+  const anchorSeat = gridFlat.find(s => s.studentClassId === anchor.classId && s.studentId === anchor.id);
+  if (!anchorSeat) return;
+
+  const partners = roster.filter(p =>
+    !isPlaced(p) &&
+    p.classId === anchor.classId &&
+    arePaired(anchor, p) &&
+    !isFixedStudent(p)
+  );
+  if (partners.length === 0) return;
+
+  // 位置希望のある相手は、自分の位置希望を優先するためここでは置かない
+  // （ただしアンカーが固定席のときは、相手の位置希望より隣接を優先して隣へ寄せる）
+  const movable = isFixedStudent(anchor)
+    ? partners
+    : partners.filter(p => !hasBackWish(p) && !hasFrontWish(p));
+
+  if (movable.length === 0) return;
+
+  const role: SeatNode['role'] = movable[0].defaultPref === 1 ? 'focus' : 'member';
+  placeClusterAdjacentToSeats(movable, [anchorSeat], emptyPool, role, previousSeatMap, {
+    requireAdjacent: true,
+  });
 }
 
 function buildPreviousSeatMap(previousSeats?: SeatNode[]): Map<string, number> {
@@ -530,7 +577,8 @@ function isGroupPerimeterSeat(seat: SeatNode, groupId: string, allSeats: SeatNod
 
 /**
  * 最適化席替えメインエンジン
- * 優先度: 固定席 > ペア/同グループ・隣接 > 隣り合わせ回避 > エアコン回避 > 最新アーカイブとの座席非重複
+ * 優先度: 固定席 > 後列/前列希望 > 隣接(固定・位置希望の隣) > その他ペア/同グループ
+ *         > 隣り合わせ回避 > エアコン回避 > 最新アーカイブとの座席非重複
  */
 export function generateOptimizedSeatingChart(
   students: Student[],
@@ -774,6 +822,7 @@ export function generateOptimizedSeatingChart(
 
   // ==========================================
   // ★ ステップ2: ①配置 ＆ 複数人隣接クラスタ
+  // 優先: 固定席 → 後列/前列希望（座席番号順）→ その隣に隣接希望 → 残りの隣接
   // ==========================================
   const focusOrder = getFocusContinuousOrder(rows, cols, isCombined);
   const emptySeatsForFocus = grid.flat().filter(s => !s.isInactive && s.studentId === null);
@@ -785,73 +834,82 @@ export function generateOptimizedSeatingChart(
     return valA - valB;
   });
 
-  const backWishers = remainingFocusStudents.filter(s => s.props.whenType1.preferBackRow && !s.props.whenType1.preferFrontRow);
-  const frontWishers = remainingFocusStudents.filter(s => s.props.whenType1.preferFrontRow && !s.props.whenType1.preferBackRow);
-  const normalFocus = remainingFocusStudents.filter(s => !backWishers.includes(s) && !frontWishers.includes(s));
+  const backWishers = remainingFocusStudents.filter(hasBackWish);
+  const frontWishers = remainingFocusStudents.filter(hasFrontWish);
+  const normalFocus = remainingFocusStudents.filter(s => !hasBackWish(s) && !hasFrontWish(s));
 
   const shuffle = (arr: Student[]) => [...arr].sort(() => Math.random() - 0.5);
 
+  // 後列希望は座席番号の大きい席から、前列希望は小さい席から埋める
   const orderedFocusStudents = [
-    ...shuffle(backWishers),
+    ...[...backWishers].sort((a, b) => b.id - a.id),
     ...shuffle(normalFocus),
-    ...shuffle(frontWishers)
+    ...[...frontWishers].sort((a, b) => a.id - b.id),
   ];
 
-  // 【ステップ2-位置】: 前列・後列希望を隣接より先に確定する
-  // 希望側の空き席へ先に置き、その後の隣接配置では動かさない
+  const placePartnersOfAnchors = (anchors: Student[]) => {
+    for (const anchor of anchors) {
+      if (!isPlaced(anchor)) continue;
+      placeAdjacentPartnersOfStudent(
+        anchor,
+        activeStudents,
+        grid.flat(),
+        emptySeatsForFocus,
+        previousSeatMap,
+        isPlaced
+      );
+    }
+  };
+
+  // 【ステップ2-固定隣接】: 固定席を先に確定済みなので、その隣へ隣接希望を置く
+  placePartnersOfAnchors(activeStudents.filter(isFixedStudent));
+
+  // 【ステップ2-位置】: 後列→前列の順で希望席を確定し、直後に隣接希望を隣へ
   const placeByPositionWish = (wishers: Student[], wish: 'front' | 'back') => {
-    const queue = shuffle(wishers).filter(s => !isPlaced(s));
+    // 後列: 座席番号の大きい順 / 前列: 小さい順。希望者間に別優先がなければこの順で埋める
+    const freeSeats = emptySeatsForFocus
+      .filter(s => s.studentId === null)
+      .sort((a, b) => {
+        if (a.row !== b.row) return wish === 'front' ? a.row - b.row : b.row - a.row;
+        if (a.seatIndex !== b.seatIndex) {
+          return wish === 'front' ? a.seatIndex - b.seatIndex : b.seatIndex - a.seatIndex;
+        }
+        return a.col - b.col;
+      });
+
+    const queue = [...wishers]
+      .filter(s => !isPlaced(s))
+      .sort((a, b) => (wish === 'back' ? b.id - a.id : a.id - b.id));
+
     for (const stu of queue) {
-      if (isPlaced(stu)) continue;
-      const seat = emptySeatsForFocus
-        .filter(s => s.studentId === null)
-        .sort((a, b) => {
-          if (a.row !== b.row) return wish === 'front' ? a.row - b.row : b.row - a.row;
-          return a.col - b.col;
-        })[0];
+      if (isPlaced(stu) || freeSeats.length === 0) continue;
+      // 分離制約を満たす席を座席番号順で選ぶ
+      let seatIdx = freeSeats.findIndex(s => !wouldViolateSeparation(s, stu, grid.flat(), activeStudents));
+      if (seatIdx === -1) seatIdx = 0;
+      const seat = freeSeats.splice(seatIdx, 1)[0];
       if (!seat) break;
       seat.studentId = stu.id;
       seat.studentClassId = stu.classId;
       seat.role = 'focus';
+      // 置いた直後に、隣接希望者を隣席へ（アンカー本人は動かさない）
+      placeAdjacentPartnersOfStudent(
+        stu,
+        activeStudents,
+        grid.flat(),
+        emptySeatsForFocus,
+        previousSeatMap,
+        isPlaced
+      );
     }
   };
 
   placeByPositionWish(backWishers, 'back');
   placeByPositionWish(frontWishers, 'front');
 
-  // 位置希望のないペア相手だけ、希望席の隣に置ける場合は置く（希望者本人は動かさない）
-  for (const stu of remainingFocusStudents) {
-    if (!isPlaced(stu)) continue;
-    const wish = stu.props.whenType1.preferFrontRow && !stu.props.whenType1.preferBackRow
-      ? 'front'
-      : stu.props.whenType1.preferBackRow && !stu.props.whenType1.preferFrontRow
-        ? 'back'
-        : null;
-    if (!wish) continue;
-    const anchor = grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === stu.id);
-    if (!anchor) continue;
-    const partners = remainingFocusStudents.filter(p =>
-      !isPlaced(p) &&
-      p.classId === stu.classId &&
-      arePaired(stu, p) &&
-      !(p.props.whenType1.preferFrontRow && !p.props.whenType1.preferBackRow) &&
-      !(p.props.whenType1.preferBackRow && !p.props.whenType1.preferFrontRow)
-    );
-    if (partners.length > 0) {
-      placeClusterAdjacentToSeats(partners, [anchor], emptySeatsForFocus, 'focus', previousSeatMap);
-    }
-  }
-
   // 【ステップ2-0】: ①②混合ペアの物理隣接（②配置済みの隣に①を置く）
-  // 位置希望のある①は既に希望席へ置いてあるので、ここでは動かさない
+  // 固定席・位置希望のある①は既に置いてあるので動かさない
   for (const stu of shuffle([...remainingFocusStudents])) {
-    if (isPlaced(stu)) continue;
-    if (
-      (stu.props.whenType1.preferFrontRow && !stu.props.whenType1.preferBackRow) ||
-      (stu.props.whenType1.preferBackRow && !stu.props.whenType1.preferFrontRow)
-    ) {
-      continue;
-    }
+    if (isPlaced(stu) || hasFrontWish(stu) || hasBackWish(stu) || isFixedStudent(stu)) continue;
     for (const pairId of stu.props.common.customPairs || []) {
       const partner = activeStudents.find(s => s.classId === stu.classId && s.id === pairId);
       if (!partner || partner.defaultPref === stu.defaultPref) continue;
@@ -963,7 +1021,8 @@ export function generateOptimizedSeatingChart(
   }
 
   // ==========================================
-  // ★ ステップ3.5: 隣り合わせ・同一グループ回避のスワップ修正
+  // ★ ステップ3.2: 固定席・後列希望アンカーの隣接希望を修復
+  // アンカーは動かさず、相手側を隣の空き席／隣席者とのスワップで寄せる
   // ==========================================
   const swapStudents = (a: SeatNode, b: SeatNode) => {
     const tempId = a.studentId;
@@ -1002,6 +1061,111 @@ export function generateOptimizedSeatingChart(
     }
     return false;
   };
+
+  const findSeatOf = (stu: Student) =>
+    grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === stu.id);
+
+  const isAnchorLocked = (stu: Student) => isFixedStudent(stu) || hasBackWish(stu) || hasFrontWish(stu);
+
+  const pairNeedsAdjacency = (a: Student, b: Student): boolean => {
+    const sa = findSeatOf(a);
+    const sb = findSeatOf(b);
+    if (!sa || !sb) return false;
+    if (a.defaultPref === 2 && b.defaultPref === 2) {
+      // ②同士は同島なら隣接相当とみなす
+      return !(sa.groupId && sb.groupId && sa.groupId === sb.groupId) && !isAdjacent(sa, sb);
+    }
+    return !isAdjacent(sa, sb);
+  };
+
+  let adjRepairPasses = 0;
+  let adjRepaired = true;
+  while (adjRepaired && adjRepairPasses < 40) {
+    adjRepaired = false;
+    adjRepairPasses++;
+
+    // 固定席 → 後列希望 → 前列希望 の順でアンカーを優先
+    const anchors = [
+      ...activeStudents.filter(s => isFixedStudent(s) && isPlaced(s)),
+      ...activeStudents.filter(s => !isFixedStudent(s) && hasBackWish(s) && isPlaced(s))
+        .sort((a, b) => (findSeatOf(b)?.seatIndex ?? 0) - (findSeatOf(a)?.seatIndex ?? 0)),
+      ...activeStudents.filter(s => !isFixedStudent(s) && hasFrontWish(s) && isPlaced(s))
+        .sort((a, b) => (findSeatOf(a)?.seatIndex ?? 0) - (findSeatOf(b)?.seatIndex ?? 0)),
+    ];
+
+    for (const anchor of anchors) {
+      const anchorSeat = findSeatOf(anchor);
+      if (!anchorSeat) continue;
+
+      const partners = activeStudents.filter(p =>
+        p.classId === anchor.classId &&
+        arePaired(anchor, p) &&
+        isPlaced(p) &&
+        pairNeedsAdjacency(anchor, p)
+      );
+      if (partners.length === 0) continue;
+
+      for (const partner of partners) {
+        // 相手もロックアンカーなら、固定席側を優先して相手を動かす。両方固定なら諦める
+        if (isFixedStudent(partner) && isFixedStudent(anchor)) continue;
+        const movePartner = !isFixedStudent(partner) && (
+          !isAnchorLocked(partner) || isFixedStudent(anchor) || hasBackWish(anchor)
+        );
+        if (!movePartner) continue;
+
+        const partnerSeat = findSeatOf(partner);
+        if (!partnerSeat) continue;
+
+        // 1) アンカー隣の空き席へ移動
+        const emptyAdj = grid.flat().find(s =>
+          !s.isInactive && s.studentId === null && isAdjacent(s, anchorSeat)
+        );
+        if (emptyAdj) {
+          emptyAdj.studentId = partnerSeat.studentId;
+          emptyAdj.studentClassId = partnerSeat.studentClassId;
+          emptyAdj.role = partnerSeat.role;
+          partnerSeat.studentId = null;
+          partnerSeat.studentClassId = undefined;
+          partnerSeat.role = undefined;
+          adjRepaired = true;
+          break;
+        }
+
+        // 2) アンカー隣の在席者とスワップ（ロック対象は避ける／座席番号遷移が小さい相手を優先）
+        const neighborOccupied = grid.flat()
+          .filter(s =>
+            !s.isInactive &&
+            s.studentId !== null &&
+            isAdjacent(s, anchorSeat) &&
+            s.seatIndex !== partnerSeat.seatIndex
+          )
+          .sort((a, b) =>
+            Math.abs(a.seatIndex - partnerSeat.seatIndex) - Math.abs(b.seatIndex - partnerSeat.seatIndex)
+          );
+
+        for (const neighbor of neighborOccupied) {
+          const neighborStu = activeStudents.find(s =>
+            s.classId === neighbor.studentClassId && s.id === neighbor.studentId
+          );
+          if (!neighborStu || isFixedStudent(neighborStu)) continue;
+          // 後列希望同士の入れ替えは許可。位置希望を壊す移動は避ける
+          if (hasBackWish(neighborStu) && !hasBackWish(partner) && !isFixedStudent(anchor)) continue;
+          if (hasFrontWish(neighborStu) && !hasFrontWish(partner) && !isFixedStudent(anchor)) continue;
+          if (wouldBreakPairAdjacency(partnerSeat, neighbor)) continue;
+
+          swapStudents(partnerSeat, neighbor);
+          adjRepaired = true;
+          break;
+        }
+        if (adjRepaired) break;
+      }
+      if (adjRepaired) break;
+    }
+  }
+
+  // ==========================================
+  // ★ ステップ3.5: 隣り合わせ・同一グループ回避のスワップ修正
+  // ==========================================
 
   const hasSeparationViolation = (seat: SeatNode): boolean => {
     if (seat.studentId === null || !seat.studentClassId || seat.isInactive) return false;
@@ -1050,11 +1214,22 @@ export function generateOptimizedSeatingChart(
       const stu = activeStudents.find(s => s.classId === seat.studentClassId && s.id === seat.studentId);
       if (!stu || isFixedStudent(stu)) continue;
 
-      // 同ロール優先 → それでもダメなら異ロールも試す
-      const candidates = [
-        ...occupied.filter(t => t.role === seat.role),
-        ...occupied.filter(t => t.role !== seat.role),
-      ];
+      // 後列希望同士／前列希望同士を優先し、座席番号の遷移が小さい相手から試す
+      const candidates = occupied
+        .filter(t => t.seatIndex !== seat.seatIndex && t.studentId !== null)
+        .sort((a, b) => {
+          const aStu = activeStudents.find(s => s.classId === a.studentClassId && s.id === a.studentId);
+          const bStu = activeStudents.find(s => s.classId === b.studentClassId && s.id === b.studentId);
+          const sameWish = (x?: Student) =>
+            (hasBackWish(stu) && !!x && hasBackWish(x)) ||
+            (hasFrontWish(stu) && !!x && hasFrontWish(x)) ? 0 : 1;
+          const wishDiff = sameWish(aStu) - sameWish(bStu);
+          if (wishDiff !== 0) return wishDiff;
+          const roleDiff = (a.role === seat.role ? 0 : 1) - (b.role === seat.role ? 0 : 1);
+          if (roleDiff !== 0) return roleDiff;
+          return Math.abs(a.seatIndex - seat.seatIndex) - Math.abs(b.seatIndex - seat.seatIndex);
+        });
+
       const swapTarget = candidates.find(target => trySeparationSwap(seat, target));
 
       if (swapTarget) {
