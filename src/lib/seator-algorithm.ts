@@ -335,7 +335,33 @@ function studentKey(classId: string, id: number): string {
   return `${classId}-${id}`;
 }
 
-/** customPairs の連結成分（同クラス内・双方向）。2人以上のクラスタを返す */
+/** 生徒の4桁番号（例: 2-4組3番 → 2403） */
+function fourDigitId(s: { classId: string; id: number }): number {
+  const [grade, classNum] = s.classId.split('-').map(Number);
+  return grade * 1000 + classNum * 100 + s.id;
+}
+
+/**
+ * customPairs / separateFrom の参照番号を解決する。
+ * 1000以上は4桁番号（特別クラスでクラスをまたぐ指定）、それ未満は同じクラスの出席番号
+ */
+function resolveRef(owner: Student, ref: number): { classId: string; id: number } {
+  if (ref >= 1000) {
+    return { classId: `${Math.floor(ref / 1000)}-${Math.floor((ref % 1000) / 100)}`, id: ref % 100 };
+  }
+  return { classId: owner.classId, id: ref };
+}
+
+function refersTo(owner: Student, list: number[] | undefined, target: Student): boolean {
+  if (!list || list.length === 0) return false;
+  const t = fourDigitId(target);
+  return list.some(r => {
+    const x = resolveRef(owner, r);
+    return fourDigitId(x) === t;
+  });
+}
+
+/** customPairs の連結成分（双方向。4桁番号指定ならクラス跨ぎ）。2人以上のクラスタを返す */
 function getPairClusters(students: Student[]): Student[][] {
   const byKey = new Map<string, Student>();
   for (const s of students) byKey.set(studentKey(s.classId, s.id), s);
@@ -357,7 +383,8 @@ function getPairClusters(students: Student[]): Student[][] {
     const sk = studentKey(s.classId, s.id);
     find(sk);
     for (const pid of s.props.common.customPairs || []) {
-      const pk = studentKey(s.classId, pid);
+      const t = resolveRef(s, pid);
+      const pk = studentKey(t.classId, t.id);
       if (byKey.has(pk)) union(sk, pk);
     }
   }
@@ -372,11 +399,7 @@ function getPairClusters(students: Student[]): Student[][] {
 }
 
 function arePaired(a: Student, b: Student): boolean {
-  if (a.classId !== b.classId) return false;
-  return (
-    (a.props.common.customPairs?.includes(b.id) ?? false) ||
-    (b.props.common.customPairs?.includes(a.id) ?? false)
-  );
+  return refersTo(a, a.props.common.customPairs, b) || refersTo(b, b.props.common.customPairs, a);
 }
 
 function isAdjacent(a: SeatNode, b: SeatNode): boolean {
@@ -488,7 +511,6 @@ function placeAdjacentPartnersOfStudent(
 
   const partners = roster.filter(p =>
     !isPlaced(p) &&
-    p.classId === anchor.classId &&
     arePaired(anchor, p) &&
     !isFixedStudent(p)
   );
@@ -524,11 +546,7 @@ function isFixedStudent(stu: Student): boolean {
 }
 
 function areSeparated(a: Student, b: Student): boolean {
-  if (a.classId !== b.classId) return false;
-  return (
-    (a.props.common.separateFrom?.includes(b.id) ?? false) ||
-    (b.props.common.separateFrom?.includes(a.id) ?? false)
-  );
+  return refersTo(a, a.props.common.separateFrom, b) || refersTo(b, b.props.common.separateFrom, a);
 }
 
 function getAdjacentSeats(seat: SeatNode, allSeats: SeatNode[]): SeatNode[] {
@@ -563,7 +581,8 @@ function hasSeparatedInAssigned(assigned: Student[], candidate: Student): boolea
 
 function hasMixedTypePair(stu: Student, roster: Student[]): boolean {
   return (stu.props.common.customPairs || []).some(pid => {
-    const partner = roster.find(s => s.classId === stu.classId && s.id === pid);
+    const ref = resolveRef(stu, pid);
+    const partner = roster.find(s => s.classId === ref.classId && s.id === ref.id);
     return partner && partner.defaultPref !== stu.defaultPref;
   });
 }
@@ -917,7 +936,8 @@ export function generateOptimizedSeatingChart(
   for (const stu of shuffle([...remainingFocusStudents])) {
     if (isPlaced(stu) || hasFrontWish(stu) || hasBackWish(stu) || isFixedStudent(stu)) continue;
     for (const pairId of stu.props.common.customPairs || []) {
-      const partner = activeStudents.find(s => s.classId === stu.classId && s.id === pairId);
+      const ref = resolveRef(stu, pairId);
+      const partner = activeStudents.find(s => s.classId === ref.classId && s.id === ref.id);
       if (!partner || partner.defaultPref === stu.defaultPref) continue;
       const partnerSeat = grid.flat().find(s =>
         s.studentClassId === partner.classId && s.studentId === partner.id
@@ -1050,8 +1070,9 @@ export function generateOptimizedSeatingChart(
       const stu = activeStudents.find(s => s.classId === from.studentClassId && s.id === from.studentId);
       if (!stu?.props.common.customPairs?.length) continue;
       for (const pid of stu.props.common.customPairs) {
-        if (to.studentClassId === stu.classId && to.studentId === pid) continue;
-        const partnerSeat = grid.flat().find(s => s.studentClassId === stu.classId && s.studentId === pid);
+        const ref = resolveRef(stu, pid);
+        if (to.studentClassId === ref.classId && to.studentId === ref.id) continue;
+        const partnerSeat = grid.flat().find(s => s.studentClassId === ref.classId && s.studentId === ref.id);
         if (!partnerSeat) continue;
         if (isAdjacent(from, partnerSeat) && !isAdjacent(to, partnerSeat)) return true;
         // ②同士で同じ島にいるペアは、島を跨ぐスワップを禁止
@@ -1104,7 +1125,6 @@ export function generateOptimizedSeatingChart(
       if (!anchorSeat) continue;
 
       const partners = activeStudents.filter(p =>
-        p.classId === anchor.classId &&
         arePaired(anchor, p) &&
         isPlaced(p) &&
         pairNeedsAdjacency(anchor, p)
@@ -1322,7 +1342,8 @@ export function generateOptimizedSeatingChart(
     const seenPairs = new Set<string>();
     for (const a of activeStudents) {
       for (const pid of a.props.common.customPairs || []) {
-        const b = studentByKey.get(studentKey(a.classId, pid));
+        const ref = resolveRef(a, pid);
+        const b = studentByKey.get(studentKey(ref.classId, ref.id));
         if (!b || b === a) continue;
         const k = [studentKey(a.classId, a.id), studentKey(b.classId, b.id)].sort().join('|');
         if (seenPairs.has(k)) continue;

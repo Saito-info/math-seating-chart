@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import {
   Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive,
   CustomClass, Gender, GENDER_LABEL, SeatSide, SEAT_SIDE_LABEL, AdjacentWish,
-  parseMemberList, memberToFourDigit, getCustomClassClassIds,
+  parseMemberList, memberToFourDigit, getCustomClassClassIds, parseFourDigitStudentId,
 } from '@/types';
 import {
   parseExcelData, parseExcelScoreFiles, parseGenderFromExcelFiles, ImportMode, ScoreGradeYear,
@@ -12,12 +12,24 @@ import {
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
-/** カンマ・全角カンマ・読点・スペース区切りの出席番号リストをパース */
-function parseStudentNumberList(input: string, selfId: number): number[] {
-  return input
-    .split(/[,，、\s]+/)
-    .map(s => Number(s.trim()))
-    .filter(n => !isNaN(n) && n > 0 && n !== selfId);
+type RowWish = 'front' | 'back';
+
+function getRowWish(stu: Student): RowWish | undefined {
+  const t = stu.props.whenType1;
+  if (t.preferFrontRow && !t.preferBackRow) return 'front';
+  if (t.preferBackRow && !t.preferFrontRow) return 'back';
+  return undefined;
+}
+
+/** 生徒の4桁番号（2-4組3番 → 2403） */
+function fdOf(s: { classId: string; id: number }): number {
+  const [grade, classNum] = s.classId.split('-').map(Number);
+  return grade * 1000 + classNum * 100 + s.id;
+}
+
+/** ペア/回避の参照番号を4桁へ（1000以上は4桁そのまま、未満は同じクラスの出席番号） */
+function refToFd(owner: { classId: string; id: number }, ref: number): number {
+  return ref >= 1000 ? ref : fdOf(owner) - owner.id + ref;
 }
 
 /** 出席番号は入力中に確定せず、Enter でまとめて認識する */
@@ -124,6 +136,41 @@ export default function TabStudents({
       });
 
   const studentRowKey = (s: Student) => `${s.classId}-${s.id}`;
+
+  /** 特別クラスでは4桁番号、通常クラスでは同クラスの出席番号（クラス跨ぎは4桁）で表示 */
+  const formatRefList = (owner: Student, list: number[] | undefined, sep = ', '): string =>
+    (list || [])
+      .map(r => {
+        const fd = refToFd(owner, r);
+        const sameClass = Math.floor(fd / 100) === Math.floor(fdOf(owner) / 100);
+        return activeCustom || !sameClass ? String(fd) : String(fd % 100);
+      })
+      .join(sep);
+
+  /** Enter確定時に解析。特別クラスは4桁番号のみ受け付ける（通常クラスは出席番号も可） */
+  const parseRefList = (input: string, owner: Student): number[] => {
+    const tokens = input.split(/[,，、\s]+/).map(t => t.trim()).filter(Boolean);
+    const result: number[] = [];
+    const ignored: string[] = [];
+    for (const t of tokens) {
+      const n = Number(t);
+      let stored: number | null = null;
+      if (Number.isInteger(n)) {
+        if (parseFourDigitStudentId(n)) stored = n;
+        else if (!activeCustom && n > 0 && n < 1000) stored = n;
+      }
+      if (stored === null) {
+        ignored.push(t);
+        continue;
+      }
+      if (refToFd(owner, stored) === fdOf(owner)) continue;
+      if (!result.includes(stored)) result.push(stored);
+    }
+    if (ignored.length > 0) {
+      alert(`認識できなかった入力を無視しました: ${ignored.join(', ')}\n${activeCustom ? '特別クラスでは4桁番号（例: 2403）で入力してください。' : ''}`);
+    }
+    return result;
+  };
 
   /** 隣接クラス希望の選択肢: 生徒本人と同じ学年の5クラス */
   const sameGradeClasses = (s: Student): ClassId[] =>
@@ -239,18 +286,19 @@ export default function TabStudents({
     let updatedStudents = [...students];
 
     if (updates.props?.common?.customPairs !== undefined) {
-      const oldPairs = stu.props.common.customPairs || [];
-      const newPairs = updates.props.common.customPairs;
+      // 参照は4桁番号に正規化して比較（クラス跨ぎの特別クラスにも対応）
+      const oldPairs = (stu.props.common.customPairs || []).map(r => refToFd(stu, r));
+      const newPairs = updates.props.common.customPairs.map(r => refToFd(stu, r));
       const removed = oldPairs.filter(p => !newPairs.includes(p));
-      const clique = [stu.id, ...newPairs];
+      const clique = [fdOf(stu), ...newPairs];
 
       updatedStudents = updatedStudents.map(s => {
-        if (s.classId !== stu.classId) return s;
+        const sFd = fdOf(s);
 
         // クリューク内の生徒は、互いの番号をすべて持つ
-        if (clique.includes(s.id)) {
-          const others = clique.filter(id => id !== s.id);
-          const existing = s.props.common.customPairs || [];
+        if (clique.includes(sFd)) {
+          const others = clique.filter(id => id !== sFd);
+          const existing = (s.props.common.customPairs || []).map(r => refToFd(s, r));
           // クリューク外の既存リンクは維持（今回 stu から外された番号は除く）
           const outside = existing.filter(id => !clique.includes(id) && !removed.includes(id));
           return {
@@ -266,14 +314,14 @@ export default function TabStudents({
         }
 
         // クリュークから外された生徒は、stu とのリンクだけ外す
-        if (removed.includes(s.id)) {
-          const cp = s.props.common.customPairs || [];
-          if (cp.includes(stu.id)) {
+        if (removed.includes(sFd)) {
+          const cp = (s.props.common.customPairs || []).map(r => refToFd(s, r));
+          if (cp.includes(fdOf(stu))) {
             return {
               ...s,
               props: {
                 ...s.props,
-                common: { ...s.props.common, customPairs: cp.filter(id => id !== stu.id) },
+                common: { ...s.props.common, customPairs: cp.filter(id => id !== fdOf(stu)) },
               },
             };
           }
@@ -283,33 +331,34 @@ export default function TabStudents({
     }
 
     if (updates.props?.common?.separateFrom !== undefined) {
-      const oldSep = stu.props.common.separateFrom || [];
-      const newSep = updates.props.common.separateFrom;
+      const oldSep = (stu.props.common.separateFrom || []).map(r => refToFd(stu, r));
+      const newSep = updates.props.common.separateFrom.map(r => refToFd(stu, r));
       const added = newSep.filter(p => !oldSep.includes(p));
       const removed = oldSep.filter(p => !newSep.includes(p));
+      const myFd = fdOf(stu);
 
       updatedStudents = updatedStudents.map(s => {
-        if (s.classId !== stu.classId) return s;
-        if (added.includes(s.id)) {
-          const sf = s.props.common.separateFrom || [];
-          if (!sf.includes(stu.id)) {
+        const sFd = fdOf(s);
+        if (added.includes(sFd)) {
+          const sf = (s.props.common.separateFrom || []).map(r => refToFd(s, r));
+          if (!sf.includes(myFd)) {
             return {
               ...s,
               props: {
                 ...s.props,
-                common: { ...s.props.common, separateFrom: [...sf, stu.id] },
+                common: { ...s.props.common, separateFrom: [...sf, myFd] },
               },
             };
           }
         }
-        if (removed.includes(s.id)) {
-          const sf = s.props.common.separateFrom || [];
-          if (sf.includes(stu.id)) {
+        if (removed.includes(sFd)) {
+          const sf = (s.props.common.separateFrom || []).map(r => refToFd(s, r));
+          if (sf.includes(myFd)) {
             return {
               ...s,
               props: {
                 ...s.props,
-                common: { ...s.props.common, separateFrom: sf.filter(id => id !== stu.id) },
+                common: { ...s.props.common, separateFrom: sf.filter(id => id !== myFd) },
               },
             };
           }
@@ -631,8 +680,8 @@ export default function TabStudents({
                 {allStudentsList.map(stu => {
                   const rowKey = studentRowKey(stu);
                   const isOpen = openStudentId === rowKey;
-                  const pairsStr = stu.props.common.customPairs?.join(', ') || '';
-                  const separateStr = stu.props.common.separateFrom?.join(', ') || '';
+                  const pairsStr = formatRefList(stu, stu.props.common.customPairs);
+                  const separateStr = formatRefList(stu, stu.props.common.separateFrom);
                   const adjWish = stu.props.common.adjacentWish;
 
                   return (
@@ -674,8 +723,8 @@ export default function TabStudents({
                               ...(adjWish.classIds || []),
                               ...(adjWish.gender ? [GENDER_LABEL[adjWish.gender]] : []),
                             ].join('・')}) `}
-                            {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${stu.props.common.customPairs.join(',')}) `}
-                            {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣/同G回避(${stu.props.common.separateFrom.join(',')}) `}
+                            {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${formatRefList(stu, stu.props.common.customPairs, ',')}) `}
+                            {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣/同G回避(${formatRefList(stu, stu.props.common.separateFrom, ',')}) `}
                           </span>
                         </td>
                       </tr>
@@ -749,12 +798,14 @@ export default function TabStudents({
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🤝 隣接/同グループ(Enterで確定):</span>
+                                  <span className="shrink-0 mr-2">
+                                    🤝 隣接/同グループ{activeCustom ? '（4桁番号）' : ''}(Enterで確定):
+                                  </span>
                                   <NumberListInput
                                     value={pairsStr}
-                                    placeholder="例: 3, 6, 12"
+                                    placeholder={activeCustom ? '例: 2403, 2515' : '例: 3, 6, 12'}
                                     onCommit={(raw) => {
-                                      const nums = parseStudentNumberList(raw, stu.id);
+                                      const nums = parseRefList(raw, stu);
                                       handleUpdateStudentProp(stu, {
                                         props: { ...stu.props, common: { ...stu.props.common, customPairs: nums } }
                                       });
@@ -763,44 +814,20 @@ export default function TabStudents({
                                 </div>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🚫 隣・同一グループ回避(Enterで確定):</span>
+                                  <span className="shrink-0 mr-2">
+                                    🚫 隣・同一グループ回避{activeCustom ? '（4桁番号）' : ''}(Enterで確定):
+                                  </span>
                                   <NumberListInput
                                     value={separateStr}
-                                    placeholder="例: 3, 6"
+                                    placeholder={activeCustom ? '例: 2403, 2515' : '例: 3, 6'}
                                     onCommit={(raw) => {
-                                      const nums = parseStudentNumberList(raw, stu.id);
+                                      const nums = parseRefList(raw, stu);
                                       handleUpdateStudentProp(stu, {
                                         props: { ...stu.props, common: { ...stu.props.common, separateFrom: nums } }
                                       });
                                     }}
                                   />
                                 </div>
-
-                                <label className="flex items-center gap-2 bg-indigo-900/60 p-3 rounded-xl border border-indigo-800 cursor-pointer hover:bg-indigo-900">
-                                  <input
-                                    type="checkbox"
-                                    checked={stu.props.whenType1.preferFrontRow || false}
-                                    onChange={(e) => handleUpdateStudentProp(stu, {
-                                      props: { ...stu.props, whenType1: { ...stu.props.whenType1, preferFrontRow: e.target.checked } }
-                                    })}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="w-4 h-4 text-cyan-400 rounded"
-                                  />
-                                  <span>⬆️ ①選択時：前列を希望</span>
-                                </label>
-
-                                <label className="flex items-center gap-2 bg-indigo-900/60 p-3 rounded-xl border border-indigo-800 cursor-pointer hover:bg-indigo-900">
-                                  <input
-                                    type="checkbox"
-                                    checked={stu.props.whenType1.preferBackRow || false}
-                                    onChange={(e) => handleUpdateStudentProp(stu, {
-                                      props: { ...stu.props, whenType1: { ...stu.props.whenType1, preferBackRow: e.target.checked } }
-                                    })}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="w-4 h-4 text-cyan-400 rounded"
-                                  />
-                                  <span>⬇️ ①選択時：後列を希望</span>
-                                </label>
 
                                 <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
                                   <span className="shrink-0 mr-2">⚧ 本人の性別:</span>
@@ -820,26 +847,57 @@ export default function TabStudents({
                                   </div>
                                 </div>
 
-                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
-                                  <span className="shrink-0 mr-2">🪟 座席の左右位置:</span>
-                                  <div className="flex gap-1.5">
-                                    {([undefined, 'window', 'corridor'] as (SeatSide | undefined)[]).map(side => (
-                                      <button
-                                        key={side ?? 'none'}
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleUpdateStudentProp(stu, {
-                                            props: { ...stu.props, common: { ...stu.props.common, preferSide: side } }
-                                          });
-                                        }}
-                                        className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
-                                          stu.props.common.preferSide === side ? 'bg-amber-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
-                                        }`}
-                                      >
-                                        {side ? SEAT_SIDE_LABEL[side] : '指定なし'}
-                                      </button>
-                                    ))}
+                                <div className="bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800 space-y-2 sm:col-span-2 lg:col-span-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="shrink-0">↔️ 左右（教室）:</span>
+                                    <div className="flex gap-1.5">
+                                      {([undefined, 'window', 'corridor'] as (SeatSide | undefined)[]).map(side => (
+                                        <button
+                                          key={side ?? 'none'}
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpdateStudentProp(stu, {
+                                              props: { ...stu.props, common: { ...stu.props.common, preferSide: side } }
+                                            });
+                                          }}
+                                          className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                            stu.props.common.preferSide === side ? 'bg-amber-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                          }`}
+                                        >
+                                          {side ? SEAT_SIDE_LABEL[side] : '指定なし'}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="shrink-0">↕️ 前後:</span>
+                                    <div className="flex gap-1.5">
+                                      {([undefined, 'front', 'back'] as (RowWish | undefined)[]).map(rw => (
+                                        <button
+                                          key={rw ?? 'none'}
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpdateStudentProp(stu, {
+                                              props: {
+                                                ...stu.props,
+                                                whenType1: {
+                                                  ...stu.props.whenType1,
+                                                  preferFrontRow: rw === 'front',
+                                                  preferBackRow: rw === 'back',
+                                                },
+                                              },
+                                            });
+                                          }}
+                                          className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                            getRowWish(stu) === rw ? 'bg-amber-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                          }`}
+                                        >
+                                          {rw === 'front' ? '⬆️ 前列' : rw === 'back' ? '⬇️ 後列' : '指定なし'}
+                                        </button>
+                                      ))}
+                                    </div>
                                   </div>
                                 </div>
 
