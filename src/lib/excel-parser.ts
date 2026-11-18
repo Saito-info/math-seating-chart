@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { Student, StudentProperties, ClassId } from '@/types';
+import { Student, StudentProperties, ClassId, Gender } from '@/types';
 
 export type ImportMode = 'seat-pref' | 'score';
 
@@ -365,6 +365,106 @@ export async function parseExcelScoreFiles(
       gradeYear: Number(currentClassId.split('-')[0]) as ScoreGradeYear,
       format: 'legacy',
     },
+  };
+}
+
+export type GenderImportSummary = {
+  count: number;
+  male: number;
+  female: number;
+  classes: ClassId[];
+  fileNames: string[];
+  gradeYear: ScoreGradeYear;
+};
+
+function parseGenderCell(raw: unknown): Gender | null {
+  const s = String(raw ?? '').trim();
+  if (/^(男|男子|男性|M|male)$/i.test(s)) return 'male';
+  if (/^(女|女子|女性|F|female)$/i.test(s)) return 'female';
+  return null;
+}
+
+/** 「学籍番号」「性別」列を持つ行（ヘッダー）を検出 */
+function detectGenderLayout(rawData: unknown[][]): { idCol: number; genderCol: number; dataStartRow: number } | null {
+  for (let rowIdx = 0; rowIdx < Math.min(8, rawData.length); rowIdx++) {
+    const row = rawData[rowIdx] || [];
+    let idCol = -1;
+    let genderCol = -1;
+    for (let colIdx = 0; colIdx < row.length; colIdx++) {
+      const cell = String(row[colIdx] ?? '').trim();
+      if (/学籍番号/.test(cell)) idCol = colIdx;
+      if (/^性別/.test(cell)) genderCol = colIdx;
+    }
+    if (idCol !== -1 && genderCol !== -1) return { idCol, genderCol, dataStartRow: rowIdx + 1 };
+  }
+  return null;
+}
+
+/**
+ * 学籍順シート（A列=学籍番号, 「性別」列=男/女）から性別を読み取り、既存データへ反映する。
+ * 学籍番号が3桁（先頭学年省略）の場合は gradeYear で補完する。
+ */
+export async function parseGenderFromExcelFiles(
+  files: File[],
+  gradeYear: ScoreGradeYear,
+  existingStudents: Student[]
+): Promise<{ students: Student[]; summary: GenderImportSummary }> {
+  const studentsMap = new Map<string, Student>();
+  existingStudents.forEach(s =>
+    studentsMap.set(`${s.classId}-${s.id}`, { ...s, props: { ...s.props, common: { ...s.props.common } } })
+  );
+
+  const affected = new Set<ClassId>();
+  const usedNames: string[] = [];
+  let male = 0;
+  let female = 0;
+  let count = 0;
+
+  for (const file of files) {
+    const buffer = await readFileAsArrayBuffer(file);
+    const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+
+    let fileUsed = false;
+    for (const sheetName of workbook.SheetNames) {
+      const rawData: unknown[][] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '' });
+      const layout = detectGenderLayout(rawData);
+      if (!layout) continue;
+
+      for (let rowIdx = layout.dataStartRow; rowIdx < rawData.length; rowIdx++) {
+        const row = rawData[rowIdx] || [];
+        const parsed = parseShortGakusekiId(row[layout.idCol], gradeYear);
+        const gender = parseGenderCell(row[layout.genderCol]);
+        if (!parsed || !gender) continue;
+
+        const key = `${parsed.classId}-${parsed.exID}`;
+        const existing = studentsMap.get(key);
+        if (existing) {
+          studentsMap.set(key, { ...existing, gender });
+        } else {
+          studentsMap.set(key, {
+            id: parsed.exID,
+            classId: parsed.classId,
+            name: `${parsed.classId} ${parsed.exID}番`,
+            defaultPref: 2,
+            score: 0,
+            gender,
+            props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
+          });
+        }
+        affected.add(parsed.classId);
+        count++;
+        if (gender === 'male') male++;
+        else female++;
+        fileUsed = true;
+      }
+      if (fileUsed) break;
+    }
+    if (fileUsed) usedNames.push(file.name);
+  }
+
+  return {
+    students: Array.from(studentsMap.values()),
+    summary: { count, male, female, classes: [...affected].sort(), fileNames: usedNames, gradeYear },
   };
 }
 

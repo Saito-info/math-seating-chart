@@ -1,21 +1,32 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Student, ClassId, SeatingFunction, ALL_CLASSES, getMaxStudents } from '@/types';
-import { generateAICheckedSeatingFunction } from '@/lib/math-engine';
+import {
+  Student, ClassId, SeatingFunction, CustomClass, ALL_CLASSES, getMaxStudents, getCustomClassClassIds,
+} from '@/types';
+import { generateAICheckedSeatingFunction, generateInjectiveFunctionForDomain } from '@/lib/math-engine';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
 type Props = {
   currentClass: ClassId;
+  customClasses: CustomClass[];
+  selectedCustomClassId: string | null;
   students: Student[];
   absenteeIds: string[];
   onToggleAbsentee: (classId: ClassId, id: number) => void;
-  onGenerate: (func: SeatingFunction, isCombined: boolean, targetClasses: ClassId[]) => void;
+  onGenerate: (
+    func: SeatingFunction,
+    isCombined: boolean,
+    targetClasses: ClassId[],
+    customClassId?: string
+  ) => void;
 };
 
 export default function TabFormula({
   currentClass,
+  customClasses,
+  selectedCustomClassId,
   students,
   absenteeIds,
   onToggleAbsentee,
@@ -23,13 +34,21 @@ export default function TabFormula({
 }: Props) {
   const [difficulty, setDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
   const [isCombined, setIsCombined] = useState<boolean>(false);
+  const [isCustom, setIsCustom] = useState<boolean>(
+    () => !!selectedCustomClassId && customClasses.some(c => c.id === selectedCustomClassId)
+  );
+  const [customId, setCustomId] = useState<string>(
+    () => selectedCustomClassId ?? customClasses[0]?.id ?? ''
+  );
   const [selectedClasses, setSelectedClasses] = useState<ClassId[]>([currentClass]);
   const [currentFunc, setCurrentFunc] = useState<SeatingFunction | null>(null);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
 
+  const activeCustom = isCustom ? customClasses.find(c => c.id === customId) : undefined;
+
   useEffect(() => {
     handleRegenerateMath();
-  }, [isCombined, selectedClasses, difficulty]);
+  }, [isCombined, selectedClasses, difficulty, isCustom, customId]);
 
   const handleToggleClass = (cId: ClassId) => {
     setSelectedClasses(prev => {
@@ -41,11 +60,21 @@ export default function TabFormula({
   const handleRegenerateMath = async () => {
     setIsGenerating(true);
     try {
-      const func = await generateAICheckedSeatingFunction(
-        isCombined ? selectedClasses : [currentClass],
-        isCombined,
-        difficulty
-      );
+      let func: SeatingFunction;
+      if (activeCustom) {
+        // 特別クラス: メンバー全員の (クラス番号 m, 出席番号 n) で単射になる2変数関数 f(m, n)
+        const domain = activeCustom.members.map(mem => ({
+          m: Number(mem.classId.split('-')[1]) || 1,
+          n: mem.id,
+        }));
+        func = await generateInjectiveFunctionForDomain(domain, true, difficulty);
+      } else {
+        func = await generateAICheckedSeatingFunction(
+          isCombined ? selectedClasses : [currentClass],
+          isCombined,
+          difficulty
+        );
+      }
       setCurrentFunc(func);
     } catch (e) {
       console.error(e);
@@ -54,14 +83,22 @@ export default function TabFormula({
     }
   };
 
-  const targetClassesList = isCombined ? selectedClasses : [currentClass];
+  const targetClassesList = activeCustom
+    ? getCustomClassClassIds(activeCustom)
+    : isCombined ? selectedClasses : [currentClass];
 
-  const currentTargetAbsenteesCount = targetClassesList.reduce((sum, cId) => {
-    const maxNum = getMaxStudents(cId);
-    const classAbs = Array.from({ length: maxNum }, (_, i) => `${cId}-${i + 1}`)
-      .filter(key => absenteeIds.includes(key)).length;
-    return sum + classAbs;
-  }, 0);
+  /** 出欠リストに表示する名簿（特別クラスはメンバーのみ） */
+  const rosterGroups: { cId: ClassId; nums: number[] }[] = targetClassesList.map(cId => ({
+    cId,
+    nums: activeCustom
+      ? activeCustom.members.filter(m => m.classId === cId).map(m => m.id).sort((a, b) => a - b)
+      : Array.from({ length: getMaxStudents(cId) }, (_, i) => i + 1),
+  }));
+
+  const currentTargetAbsenteesCount = rosterGroups.reduce(
+    (sum, g) => sum + g.nums.filter(n => absenteeIds.includes(`${g.cId}-${n}`)).length,
+    0
+  );
 
   return (
     <div className="space-y-6">
@@ -70,8 +107,8 @@ export default function TabFormula({
           <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-xl border border-slate-300">
             <input
               type="radio"
-              checked={!isCombined}
-              onChange={() => { setIsCombined(false); setSelectedClasses([currentClass]); }}
+              checked={!isCombined && !isCustom}
+              onChange={() => { setIsCombined(false); setIsCustom(false); setSelectedClasses([currentClass]); }}
               className="w-4 h-4 text-indigo-600"
             />
             <span className="text-sm">通常授業（単一クラス / 横6列・縦7行）</span>
@@ -79,18 +116,47 @@ export default function TabFormula({
           <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-xl border border-slate-300">
             <input
               type="radio"
-              checked={isCombined}
+              checked={isCombined && !isCustom}
               onChange={() => {
                 setIsCombined(true);
+                setIsCustom(false);
                 if (selectedClasses.length < 2) setSelectedClasses([currentClass, '2-2']);
               }}
               className="w-4 h-4 text-indigo-600"
             />
             <span className="text-sm">合同授業（複数クラス混合 / 横8列固定・両端①専用・中央6列②配置）</span>
           </label>
+          <label className="flex items-center gap-2 cursor-pointer bg-emerald-50 px-4 py-2 rounded-xl border border-emerald-300">
+            <input
+              type="radio"
+              checked={isCustom}
+              onChange={() => { setIsCombined(false); setIsCustom(true); }}
+              className="w-4 h-4 text-emerald-600"
+            />
+            <span className="text-sm">特別クラス（特別割など / 横6列・縦7行 / 2変数関数）</span>
+          </label>
         </div>
 
-        {isCombined && (
+        {isCustom && (
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <span className="text-xs font-bold text-slate-500">特別クラス:</span>
+            {customClasses.length === 0 ? (
+              <span className="text-xs font-bold text-rose-600">データ管理の「🏷️ 特別クラス」で作成してください</span>
+            ) : (
+              <select
+                value={customId}
+                onChange={(e) => setCustomId(e.target.value)}
+                className="border border-emerald-300 rounded-lg px-3 py-1.5 font-bold text-sm bg-white text-emerald-900 cursor-pointer"
+              >
+                {customClasses.map(c => (
+                  <option key={c.id} value={c.id}>{c.label}（{c.members.length}名）</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        {isCombined && !isCustom && (
           <div className="flex items-center gap-2 flex-wrap justify-end">
             <span className="text-xs font-bold text-slate-500">対象:</span>
             {ALL_CLASSES.map(cId => (
@@ -124,9 +190,8 @@ export default function TabFormula({
           </div>
 
           <div className="space-y-6 max-h-[550px] overflow-y-auto pr-1">
-            {targetClassesList.map((cId) => {
-              const maxNum = getMaxStudents(cId);
-              const allSeatNumbers = Array.from({ length: maxNum }, (_, i) => i + 1);
+            {rosterGroups.map(({ cId, nums: allSeatNumbers }) => {
+              const maxNum = allSeatNumbers.length;
               const classAbsenteesCount = allSeatNumbers.filter(num => absenteeIds.includes(`${cId}-${num}`)).length;
 
               return (
@@ -210,7 +275,11 @@ export default function TabFormula({
                   <BlockMath math={currentFunc.latexString} />
                 </div>
                 <div className="text-[10px] text-emerald-400 font-bold mt-2 flex items-center gap-1 justify-center">
-                  <span>✓ 単射チェック合格（全席衝突ゼロ保証）</span>
+                  <span>
+                    {activeCustom
+                      ? `✓ 単射チェック合格（${activeCustom.members.length}名の (m, n) すべてで値が異なります）`
+                      : '✓ 単射チェック合格（全席衝突ゼロ保証）'}
+                  </span>
                 </div>
               </>
             ) : null}
@@ -228,8 +297,16 @@ export default function TabFormula({
 
             <button
               type="button"
-              onClick={() => currentFunc && onGenerate(currentFunc, isCombined, isCombined ? selectedClasses : [currentClass])}
-              disabled={isGenerating || !currentFunc}
+              onClick={() =>
+                currentFunc &&
+                onGenerate(
+                  currentFunc,
+                  isCombined && !isCustom,
+                  targetClassesList.length > 0 && (isCombined || isCustom) ? targetClassesList : [currentClass],
+                  activeCustom?.id
+                )
+              }
+              disabled={isGenerating || !currentFunc || (isCustom && !activeCustom)}
               className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white font-black rounded-xl shadow-lg transition text-sm flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>✨ このAI数式で席替えを実行する！</span>

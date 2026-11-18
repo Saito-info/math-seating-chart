@@ -568,10 +568,13 @@ function hasMixedTypePair(stu: Student, roster: Student[]): boolean {
   });
 }
 
-/** グループ島の外側（①と隣接しうる）席か */
-function isGroupPerimeterSeat(seat: SeatNode, groupId: string, allSeats: SeatNode[]): boolean {
+/**
+ * グループ島の外周席（①の席と隣接しうる席）か。
+ * 他の②島の席ではなく、どの島にも属さない席（＝①が座る席）と接していることを条件にする
+ */
+function isGroupPerimeterSeat(seat: SeatNode, groupSeatIndices: Set<number>, allSeats: SeatNode[]): boolean {
   return getAdjacentSeats(seat, allSeats).some(n =>
-    !n.isInactive && (n.studentId === null || n.groupId !== groupId)
+    !n.isInactive && !groupSeatIndices.has(n.seatIndex)
   );
 }
 
@@ -780,6 +783,9 @@ export function generateOptimizedSeatingChart(
   }
 
   // 座席割当（アーカイブ重複を避ける並びを優先。①隣接希望の②は島の外周席へ）
+  const allGroupSeatIndices = new Set<number>(
+    groupsData.flatMap(g => g.targetSeats.map(s => s.seatIndex))
+  );
   for (const g of groupsData) {
     if (g.targetSeats.length === 0) continue;
     g.targetSeats.forEach(s => { s.groupId = g.pat.id; });
@@ -790,8 +796,8 @@ export function generateOptimizedSeatingChart(
       const pool = [...seatsLeft];
       if (hasMixedTypePair(stu, activeStudents)) {
         pool.sort((a, b) => {
-          const aPerim = isGroupPerimeterSeat(a, g.pat.id, grid.flat()) ? 0 : 1;
-          const bPerim = isGroupPerimeterSeat(b, g.pat.id, grid.flat()) ? 0 : 1;
+          const aPerim = isGroupPerimeterSeat(a, allGroupSeatIndices, grid.flat()) ? 0 : 1;
+          const bPerim = isGroupPerimeterSeat(b, allGroupSeatIndices, grid.flat()) ? 0 : 1;
           return aPerim - bPerim;
         });
       }
@@ -1279,6 +1285,174 @@ export function generateOptimizedSeatingChart(
   });
 
   // ==========================================
+  // ★ ステップ4.5: 窓側/廊下側の位置希望・隣接クラス/性別の希望（他の制約を崩さないスワップ最適化）
+  // 窓側＝左（列番号が小さい）／廊下側＝右（列番号が大きい）
+  // 辞書式の優先: ①位置希望（前後列・窓/廊下）を悪化させない・改善 → ②未達成のペア隣接を解消 → ③隣接希望の充足人数を増やす
+  // 固定席・達成済みペア隣接・隣回避・エアコン回避は常に維持する
+  // ==========================================
+  const allSeatsFlat = grid.flat();
+  const studentByKey = new Map<string, Student>();
+  activeStudents.forEach(s => studentByKey.set(studentKey(s.classId, s.id), s));
+  const seatByPos = new Map<string, SeatNode>();
+  allSeatsFlat.forEach(s => seatByPos.set(`${s.row}-${s.col}`, s));
+
+  const studentAt = (seat: SeatNode): Student | undefined =>
+    seat.studentId === null || !seat.studentClassId
+      ? undefined
+      : studentByKey.get(studentKey(seat.studentClassId, seat.studentId));
+
+  const hasSideWish = (s: Student) => !!s.props.common.preferSide;
+  const hasAdjWish = (s: Student) => {
+    const w = s.props.common.adjacentWish;
+    return !!w && ((w.classIds?.length ?? 0) > 0 || !!w.gender);
+  };
+  const adjWishers = activeStudents.filter(hasAdjWish);
+
+  /** [前後方向スコア, 左右方向スコア]（大きいほど希望に近い） */
+  const positionVector = (stu: Student, seat: SeatNode): [number, number] => {
+    const rowScore = hasBackWish(stu) ? seat.row : hasFrontWish(stu) ? -seat.row : 0;
+    const side = stu.props.common.preferSide;
+    const sideScore = side === 'window' ? -seat.col : side === 'corridor' ? seat.col : 0;
+    return [rowScore, sideScore];
+  };
+
+  /** ペア指定（customPairs）の組一覧（重複なし） */
+  const wishPairs: [Student, Student][] = [];
+  {
+    const seenPairs = new Set<string>();
+    for (const a of activeStudents) {
+      for (const pid of a.props.common.customPairs || []) {
+        const b = studentByKey.get(studentKey(a.classId, pid));
+        if (!b || b === a) continue;
+        const k = [studentKey(a.classId, a.id), studentKey(b.classId, b.id)].sort().join('|');
+        if (seenPairs.has(k)) continue;
+        seenPairs.add(k);
+        wishPairs.push([a, b]);
+      }
+    }
+  }
+
+  /** 現在の配置での [満たされているペア数, 隣接希望（クラス・性別）が満たされている生徒数] */
+  const evaluateWishState = (): { pairs: number; adj: number } => {
+    if (adjWishers.length === 0 && wishPairs.length === 0) return { pairs: 0, adj: 0 };
+    const seatOf = new Map<string, SeatNode>();
+    for (const s of allSeatsFlat) {
+      if (!s.isInactive && s.studentId !== null && s.studentClassId) {
+        seatOf.set(studentKey(s.studentClassId, s.studentId), s);
+      }
+    }
+    let pairs = 0;
+    for (const [a, b] of wishPairs) {
+      const sa = seatOf.get(studentKey(a.classId, a.id));
+      const sb = seatOf.get(studentKey(b.classId, b.id));
+      if (!sa || !sb) continue;
+      const sameIsland = a.defaultPref === 2 && b.defaultPref === 2 && !!sa.groupId && sa.groupId === sb.groupId;
+      if (sameIsland || isAdjacent(sa, sb)) pairs++;
+    }
+    let total = 0;
+    for (const stu of adjWishers) {
+      const seat = seatOf.get(studentKey(stu.classId, stu.id));
+      if (!seat) continue;
+      const w = stu.props.common.adjacentWish!;
+      const neighbors = [
+        seatByPos.get(`${seat.row - 1}-${seat.col}`),
+        seatByPos.get(`${seat.row + 1}-${seat.col}`),
+        seatByPos.get(`${seat.row}-${seat.col - 1}`),
+        seatByPos.get(`${seat.row}-${seat.col + 1}`),
+      ];
+      const satisfied = neighbors.some(n => {
+        if (!n || n.isInactive) return false;
+        const o = studentAt(n);
+        if (!o) return false;
+        if (w.classIds?.length && !w.classIds.includes(o.classId)) return false;
+        if (w.gender && o.gender !== w.gender) return false;
+        return true;
+      });
+      if (satisfied) total++;
+    }
+    return { pairs, adj: total };
+  };
+
+  /** スワップ後も各生徒の位置希望が悪化しないか（座席は変更しない） */
+  const positionNotWorse = (a: SeatNode, b: SeatNode): { ok: boolean; gain: number } => {
+    const sa = studentAt(a);
+    const sb = studentAt(b);
+    if (!sa || !sb) return { ok: true, gain: 0 };
+    const beforeA = positionVector(sa, a);
+    const beforeB = positionVector(sb, b);
+    const afterA = positionVector(sa, b);
+    const afterB = positionVector(sb, a);
+    const ok =
+      afterA[0] >= beforeA[0] && afterA[1] >= beforeA[1] &&
+      afterB[0] >= beforeB[0] && afterB[1] >= beforeB[1];
+    const gain =
+      (afterA[0] - beforeA[0]) + (afterA[1] - beforeA[1]) +
+      (afterB[0] - beforeB[0]) + (afterB[1] - beforeB[1]);
+    return { ok, gain };
+  };
+
+  /** アーカイブ非重複など他のスワップが、位置希望・隣接希望を悪化させないか */
+  const swapKeepsWishes = (a: SeatNode, b: SeatNode): boolean => {
+    if (!positionNotWorse(a, b).ok) return false;
+    if (adjWishers.length === 0 && wishPairs.length === 0) return true;
+    const before = evaluateWishState();
+    swapStudents(a, b);
+    const after = evaluateWishState();
+    swapStudents(a, b);
+    return after.pairs >= before.pairs && after.adj >= before.adj;
+  };
+
+  const tryWishSwap = (a: SeatNode, b: SeatNode, allowCrossRole: boolean): boolean => {
+    const sa = studentAt(a);
+    const sb = studentAt(b);
+    if (!sa || !sb) return false;
+    if (a.role !== b.role) {
+      // ①(focus)と②(member)の入れ替えは、同じ区分内で希望を満たせない場合の最終手段（リーダー席は動かさない）
+      const crossOk =
+        allowCrossRole &&
+        ((a.role === 'focus' && b.role === 'member') || (a.role === 'member' && b.role === 'focus'));
+      if (!crossOk) return false;
+    }
+    if (isFixedStudent(sa) || isFixedStudent(sb)) return false;
+    if (sa.props.common.avoidAC && b.isAC_Zone) return false;
+    if (sb.props.common.avoidAC && a.isAC_Zone) return false;
+
+    const pos = positionNotWorse(a, b);
+    if (!pos.ok) return false;
+    if (pos.gain === 0 && adjWishers.length === 0 && wishPairs.length === 0) return false;
+    if (wouldBreakPairAdjacency(a, b)) return false;
+
+    const before = evaluateWishState();
+    swapStudents(a, b);
+    let accept = !hasSeparationViolation(a) && !hasSeparationViolation(b);
+    if (accept) {
+      const after = evaluateWishState();
+      // ペアの充足は減らさない。位置希望が改善するなら隣接希望が多少減っても位置希望を優先する
+      accept =
+        after.pairs >= before.pairs &&
+        (pos.gain > 0 || after.pairs > before.pairs || after.adj > before.adj);
+    }
+    if (!accept) swapStudents(a, b);
+    return accept;
+  };
+
+  if (activeStudents.some(hasSideWish) || adjWishers.length > 0 || wishPairs.length > 0) {
+    const wishSeats = allSeatsFlat.filter(s => !s.isInactive && s.studentId !== null);
+    // 1) 同じ区分内のスワップ → 2) ①②をまたぐスワップ（最終手段） → 3) 再度同区分内
+    for (const allowCrossRole of [false, true, false]) {
+      for (let sweep = 0; sweep < 8; sweep++) {
+        let improved = false;
+        for (let i = 0; i < wishSeats.length; i++) {
+          for (let j = i + 1; j < wishSeats.length; j++) {
+            if (tryWishSwap(wishSeats[i], wishSeats[j], allowCrossRole)) improved = true;
+          }
+        }
+        if (!improved) break;
+      }
+    }
+  }
+
+  // ==========================================
   // ★ ステップ5: 最新アーカイブとの座席非重複スワップ（最低優先度）
   // 固定席・ペア・隣回避・エアコン回避を壊さない範囲で、前回と同じ席を避ける
   // ==========================================
@@ -1297,6 +1471,7 @@ export function generateOptimizedSeatingChart(
       if (wouldBreakPairAdjacency(seat, target)) return false;
       if (stu.props.common.avoidAC && target.isAC_Zone) return false;
       if (other.props.common.avoidAC && seat.isAC_Zone) return false;
+      if (!swapKeepsWishes(seat, target)) return false;
 
       const aId = seat.studentId;
       const aClass = seat.studentClassId;

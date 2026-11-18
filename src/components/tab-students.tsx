@@ -1,8 +1,14 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive } from '@/types';
-import { parseExcelData, parseExcelScoreFiles, ImportMode, ScoreGradeYear } from '@/lib/excel-parser';
+import {
+  Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive,
+  CustomClass, Gender, GENDER_LABEL, SeatSide, SEAT_SIDE_LABEL, AdjacentWish,
+  parseMemberList, memberToFourDigit, getCustomClassClassIds,
+} from '@/types';
+import {
+  parseExcelData, parseExcelScoreFiles, parseGenderFromExcelFiles, ImportMode, ScoreGradeYear,
+} from '@/lib/excel-parser';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
@@ -53,6 +59,10 @@ type Props = {
   onUpdateStudents: (students: Student[]) => void;
   currentClass: ClassId;
   onChangeClass: (cId: ClassId) => void;
+  customClasses: CustomClass[];
+  onUpdateCustomClasses: (classes: CustomClass[]) => void;
+  selectedCustomClassId: string | null;
+  onSelectCustomClass: (id: string | null) => void;
   layouts: { [key in ClassId]?: ClassLayoutTemplate };
   onUpdateLayouts: (layouts: { [key in ClassId]?: ClassLayoutTemplate }) => void;
   sharedAcSeatIndices: number[];
@@ -66,6 +76,10 @@ export default function TabStudents({
   onUpdateStudents,
   currentClass,
   onChangeClass,
+  customClasses,
+  onUpdateCustomClasses,
+  selectedCustomClassId,
+  onSelectCustomClass,
   layouts,
   onUpdateLayouts,
   sharedAcSeatIndices,
@@ -73,9 +87,12 @@ export default function TabStudents({
   archives,
   onDeleteArchive,
 }: Props) {
-  const [subTab, setSubTab] = useState<'list' | 'layout' | 'archive'>('list');
+  const [subTab, setSubTab] = useState<'list' | 'layout' | 'archive' | 'gender' | 'custom'>('list');
   const [showScores, setShowScores] = useState<boolean>(false);
-  const [openStudentId, setOpenStudentId] = useState<number | null>(null);
+  const [openStudentId, setOpenStudentId] = useState<string | null>(null);
+  const [customLabelDraft, setCustomLabelDraft] = useState<string>('');
+  const [customMembersDraft, setCustomMembersDraft] = useState<string>('');
+  const [editingCustomId, setEditingCustomId] = useState<string | null>(null);
   const [selectedArchive, setSelectedArchive] = useState<SeatingArchive | null>(null);
   const [importMode, setImportMode] = useState<ImportMode>('seat-pref');
   const [scoreGradeYear, setScoreGradeYear] = useState<ScoreGradeYear>(
@@ -84,18 +101,54 @@ export default function TabStudents({
 
   const maxNum = getMaxStudents(currentClass);
 
-  const allStudentsList: Student[] = Array.from({ length: maxNum }, (_, i) => {
-    const id = i + 1;
-    const existing = students.find(s => s.classId === currentClass && s.id === id);
-    return existing || {
-      id,
-      classId: currentClass,
-      name: `${currentClass} ${id}番 (未登録)`,
-      defaultPref: 2,
-      score: 0,
-      props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} }
-    };
+  const activeCustom = customClasses.find(c => c.id === selectedCustomClassId);
+  const viewLabel = activeCustom ? activeCustom.label : currentClass;
+  const effectiveSubTab = activeCustom && subTab === 'layout' ? 'list' : subTab;
+
+  const makeStub = (classId: ClassId, id: number): Student => ({
+    id,
+    classId,
+    name: `${classId} ${id}番 (未登録)`,
+    defaultPref: 2,
+    score: 0,
+    props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
   });
+
+  const allStudentsList: Student[] = activeCustom
+    ? activeCustom.members.map(m =>
+        students.find(s => s.classId === m.classId && s.id === m.id) || makeStub(m.classId, m.id)
+      )
+    : Array.from({ length: maxNum }, (_, i) => {
+        const id = i + 1;
+        return students.find(s => s.classId === currentClass && s.id === id) || makeStub(currentClass, id);
+      });
+
+  const studentRowKey = (s: Student) => `${s.classId}-${s.id}`;
+
+  /** 隣接クラス希望の選択肢: 生徒本人と同じ学年の5クラス */
+  const sameGradeClasses = (s: Student): ClassId[] =>
+    ALL_CLASSES.filter(c => c.split('-')[0] === s.classId.split('-')[0]);
+
+  const updateAdjacentWish = (stu: Student, patch: Partial<AdjacentWish>) => {
+    const next: AdjacentWish = { ...stu.props.common.adjacentWish, ...patch };
+    if (!next.classIds || next.classIds.length === 0) delete next.classIds;
+    if (!next.gender) delete next.gender;
+    handleUpdateStudentProp(stu, {
+      props: {
+        ...stu.props,
+        common: {
+          ...stu.props.common,
+          adjacentWish: next.classIds || next.gender ? next : undefined,
+        },
+      },
+    });
+  };
+
+  const genderCounts = {
+    male: allStudentsList.filter(s => s.gender === 'male').length,
+    female: allStudentsList.filter(s => s.gender === 'female').length,
+    unset: allStudentsList.filter(s => !s.gender).length,
+  };
 
   const currentLayout: ClassLayoutTemplate = layouts[currentClass] || {
     classLabel: currentClass,
@@ -105,7 +158,9 @@ export default function TabStudents({
     disabledSeatIndices: [],
   };
 
-  const relevantArchives = archives.filter(a => a.targetClasses.includes(currentClass));
+  const relevantArchives = activeCustom
+    ? archives.filter(a => a.lessonType === 'custom' && a.customClassId === activeCustom.id)
+    : archives.filter(a => a.lessonType !== 'custom' && a.targetClasses.includes(currentClass));
 
   /** アーカイブ表示用: 対象クラスに属する欠席者数のみ数える */
   const countArchiveAbsentees = (arch: SeatingArchive): number => {
@@ -305,26 +360,130 @@ export default function TabStudents({
     });
   };
 
+  const handleSetGender = (stu: Student, gender: Gender | undefined) => {
+    handleUpdateStudentProp(stu, { gender });
+  };
+
+  /** 表示中の生徒全員の性別をまとめて設定 */
+  const handleBulkGender = (gender: Gender | undefined) => {
+    if (!confirm(`${viewLabel} の ${allStudentsList.length}名すべての性別を「${gender ? GENDER_LABEL[gender] : '未設定'}」にします。よろしいですか？`)) return;
+    const keys = new Set(allStudentsList.map(studentRowKey));
+    const updated = students.map(s => (keys.has(studentRowKey(s)) ? { ...s, gender } : s));
+    const existingKeys = new Set(students.map(studentRowKey));
+    for (const s of allStudentsList) {
+      if (!existingKeys.has(studentRowKey(s))) updated.push({ ...s, gender });
+    }
+    onUpdateStudents(updated);
+  };
+
+  const handleGenderFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    try {
+      const result = await parseGenderFromExcelFiles(Array.from(fileList), scoreGradeYear, students);
+      const summary = result.summary;
+      if (summary.count === 0) {
+        alert(
+          '性別データが見つかりませんでした。\n' +
+          '「学籍番号」列と「性別」列（男/女）を持つシートを含むファイルか確認してください。'
+        );
+      } else {
+        onUpdateStudents(result.students);
+        alert(
+          `性別をインポートしました！\n\n` +
+          `学年補完: ${summary.gradeYear}年生\n` +
+          `反映: ${summary.count}名（男 ${summary.male}名 / 女 ${summary.female}名）\n` +
+          `対象クラス: ${summary.classes.join(', ')}\n\n` +
+          summary.fileNames.map(n => `・${n}`).join('\n')
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Excelの読み込みに失敗しました。ファイルの形式を確認してください。');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const resetCustomEditor = () => {
+    setEditingCustomId(null);
+    setCustomLabelDraft('');
+    setCustomMembersDraft('');
+  };
+
+  const handleSaveCustomClass = () => {
+    const label = customLabelDraft.trim();
+    if (!label) { alert('クラス名を入力してください。'); return; }
+    const { members, invalid } = parseMemberList(customMembersDraft);
+    if (members.length === 0) { alert('メンバーを4桁の出席番号（例: 2403）で入力してください。'); return; }
+    if (invalid.length > 0) {
+      if (!confirm(`次の入力は認識できなかったため無視されます:\n${invalid.join(', ')}\n\nこのまま保存しますか？`)) return;
+    }
+    const gradeYear = (Number(members[0].classId.split('-')[0]) as 1 | 2 | 3) || 2;
+    if (editingCustomId) {
+      onUpdateCustomClasses(customClasses.map(c =>
+        c.id === editingCustomId ? { ...c, label, gradeYear, members } : c
+      ));
+    } else {
+      onUpdateCustomClasses([...customClasses, { id: `custom-${Date.now()}`, label, gradeYear, members }]);
+    }
+    resetCustomEditor();
+  };
+
+  const handleEditCustomClass = (c: CustomClass) => {
+    setEditingCustomId(c.id);
+    setCustomLabelDraft(c.label);
+    setCustomMembersDraft(c.members.map(memberToFourDigit).join(', '));
+  };
+
+  const handleDeleteCustomClass = (c: CustomClass) => {
+    if (!confirm(`特別クラス『${c.label}』を削除しますか？（生徒データやアーカイブは残ります）`)) return;
+    onUpdateCustomClasses(customClasses.filter(x => x.id !== c.id));
+    if (selectedCustomClassId === c.id) onSelectCustomClass(null);
+    if (editingCustomId === c.id) resetCustomEditor();
+  };
+
   return (
     <div className="space-y-6">
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
         <div className="flex items-center gap-4">
           <label className="font-bold text-slate-700">対象クラス:</label>
           <select
-            value={currentClass}
-            onChange={(e) => { onChangeClass(e.target.value as ClassId); setSelectedArchive(null); }}
+            value={activeCustom ? `custom:${activeCustom.id}` : currentClass}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v.startsWith('custom:')) {
+                onSelectCustomClass(v.slice('custom:'.length));
+              } else {
+                onSelectCustomClass(null);
+                onChangeClass(v as ClassId);
+              }
+              setSelectedArchive(null);
+              setOpenStudentId(null);
+            }}
             className="border border-slate-300 rounded-lg px-4 py-2 font-bold text-lg bg-slate-50 text-indigo-950 focus:ring-2 focus:ring-indigo-500 cursor-pointer"
           >
-            {ALL_CLASSES.map((cId) => (
-              <option key={cId} value={cId}>
-                {cId} ({getMaxStudents(cId)}名)
-              </option>
-            ))}
+            <optgroup label="通常クラス">
+              {ALL_CLASSES.map((cId) => (
+                <option key={cId} value={cId}>
+                  {cId} ({getMaxStudents(cId)}名)
+                </option>
+              ))}
+            </optgroup>
+            {customClasses.length > 0 && (
+              <optgroup label="特別クラス（特別割など）">
+                {customClasses.map((c) => (
+                  <option key={c.id} value={`custom:${c.id}`}>
+                    {c.label} ({c.members.length}名)
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </div>
 
         <div className="flex items-center gap-4">
-          {subTab === 'list' && (
+          {effectiveSubTab === 'list' && (
             <label className="flex items-center gap-2 cursor-pointer bg-slate-100 px-3 py-2 rounded-lg border border-slate-300 text-sm font-bold text-slate-700 select-none">
               <input
                 type="checkbox"
@@ -340,21 +499,37 @@ export default function TabStudents({
             <button
               type="button"
               onClick={() => { setSubTab('list'); setSelectedArchive(null); }}
-              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${subTab === 'list' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'list' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
             >
               📋 生徒名簿＆成績
             </button>
             <button
               type="button"
-              onClick={() => { setSubTab('layout'); setSelectedArchive(null); }}
-              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${subTab === 'layout' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+              onClick={() => { setSubTab('gender'); setSelectedArchive(null); }}
+              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'gender' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
             >
-              🏫 デフォルト座席設定
+              ⚧ 性別プリセット
             </button>
             <button
               type="button"
+              onClick={() => { setSubTab('custom'); setSelectedArchive(null); }}
+              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'custom' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+            >
+              🏷️ 特別クラス
+            </button>
+            {!activeCustom && (
+              <button
+                type="button"
+                onClick={() => { setSubTab('layout'); setSelectedArchive(null); }}
+                className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'layout' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+              >
+                🏫 デフォルト座席設定
+              </button>
+            )}
+            <button
+              type="button"
               onClick={() => setSubTab('archive')}
-              className={`px-3.5 py-2 rounded-lg transition cursor-pointer flex items-center gap-1 ${subTab === 'archive' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+              className={`px-3.5 py-2 rounded-lg transition cursor-pointer flex items-center gap-1 ${effectiveSubTab === 'archive' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
             >
               <span>📂 アーカイブ履歴</span>
               {relevantArchives.length > 0 && (
@@ -367,11 +542,11 @@ export default function TabStudents({
         </div>
       </div>
 
-      {subTab === 'list' ? (
+      {effectiveSubTab === 'list' ? (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="flex flex-col xl:flex-row justify-between xl:items-center border-b pb-4 gap-4">
             <div>
-              <h3 className="font-extrabold text-lg text-slate-800">{currentClass} 全員分データ ({allStudentsList.length}名表示)</h3>
+              <h3 className="font-extrabold text-lg text-slate-800">{viewLabel} 全員分データ ({allStudentsList.length}名表示)</h3>
               <p className="text-xs text-slate-500 mt-0.5">※生徒行をクリックするとその場で配慮事項や希望区分をアコーディオン編集できます。</p>
             </div>
 
@@ -444,8 +619,9 @@ export default function TabStudents({
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="bg-slate-100 border-b-2 border-slate-200 text-slate-600 font-bold">
-                  <th className="py-2.5 px-3 text-center w-16">番号</th>
+                  <th className="py-2.5 px-3 text-center w-16">{activeCustom ? '元クラス-番号' : '番号'}</th>
                   <th className="py-2.5 px-3">氏名・ラベル</th>
+                  <th className="py-2.5 px-3 text-center w-14">性別</th>
                   <th className="py-2.5 px-3 text-center">希望区分</th>
                   <th className="py-2.5 px-3 text-center">成績スコア</th>
                   <th className="py-2.5 px-3">特殊配慮・ペアタグ (クリックで展開)</th>
@@ -453,18 +629,31 @@ export default function TabStudents({
               </thead>
               <tbody className="divide-y divide-slate-100 font-bold">
                 {allStudentsList.map(stu => {
-                  const isOpen = openStudentId === stu.id;
+                  const rowKey = studentRowKey(stu);
+                  const isOpen = openStudentId === rowKey;
                   const pairsStr = stu.props.common.customPairs?.join(', ') || '';
                   const separateStr = stu.props.common.separateFrom?.join(', ') || '';
+                  const adjWish = stu.props.common.adjacentWish;
 
                   return (
-                    <React.Fragment key={stu.id}>
+                    <React.Fragment key={rowKey}>
                       <tr
-                        onClick={() => setOpenStudentId(isOpen ? null : stu.id)}
+                        onClick={() => setOpenStudentId(isOpen ? null : rowKey)}
                         className={`hover:bg-indigo-50/70 cursor-pointer transition ${isOpen ? 'bg-indigo-50 font-black' : ''}`}
                       >
-                        <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">{stu.id}</td>
+                        <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">
+                          {activeCustom ? `${stu.classId}-${stu.id}` : stu.id}
+                        </td>
                         <td className="py-2.5 px-3 text-slate-800">{stu.name}</td>
+                        <td className="py-2.5 px-3 text-center">
+                          {stu.gender ? (
+                            <span className={`px-2 py-0.5 rounded-full font-black text-[11px] ${stu.gender === 'male' ? 'bg-blue-100 text-blue-800' : 'bg-pink-100 text-pink-800'}`}>
+                              {GENDER_LABEL[stu.gender]}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </td>
                         <td className="py-2.5 px-3 text-center">
                           <span className={`px-2 py-0.5 rounded-full font-black text-[11px] ${stu.defaultPref === 1 ? 'bg-sky-100 text-sky-800 border border-sky-300' : 'bg-slate-100 text-slate-700 border border-slate-300'}`}>
                             {stu.defaultPref === 1 ? '① 個人・集中(青)' : '② グループ'}
@@ -480,6 +669,11 @@ export default function TabStudents({
                             {stu.props.common.fixedSeatId && `📍固定(${stu.props.common.fixedSeatId}番席) `}
                             {stu.props.whenType1.preferFrontRow && '⬆️前列希望 '}
                             {stu.props.whenType1.preferBackRow && '⬇️後列希望 '}
+                            {stu.props.common.preferSide && `${stu.props.common.preferSide === 'window' ? '🪟窓側' : '🚪廊下側'}希望 `}
+                            {adjWish && `👥隣希望(${[
+                              ...(adjWish.classIds || []),
+                              ...(adjWish.gender ? [GENDER_LABEL[adjWish.gender]] : []),
+                            ].join('・')}) `}
                             {stu.props.common.customPairs && stu.props.common.customPairs.length > 0 && `🤝同G/隣接(${stu.props.common.customPairs.join(',')}) `}
                             {stu.props.common.separateFrom && stu.props.common.separateFrom.length > 0 && `🚫隣/同G回避(${stu.props.common.separateFrom.join(',')}) `}
                           </span>
@@ -488,7 +682,7 @@ export default function TabStudents({
 
                       {isOpen && (
                         <tr className="bg-indigo-950 text-white animate-fade-in border-y-2 border-indigo-700 shadow-inner">
-                          <td colSpan={5} className="p-4 sm:p-5">
+                          <td colSpan={6} className="p-4 sm:p-5">
                             <div className="space-y-4">
                               <div className="flex justify-between items-center border-b border-indigo-800 pb-2">
                                 <span className="font-black text-sm text-indigo-300">
@@ -607,6 +801,94 @@ export default function TabStudents({
                                   />
                                   <span>⬇️ ①選択時：後列を希望</span>
                                 </label>
+
+                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
+                                  <span className="shrink-0 mr-2">⚧ 本人の性別:</span>
+                                  <div className="flex gap-1.5">
+                                    {([undefined, 'male', 'female'] as (Gender | undefined)[]).map(g => (
+                                      <button
+                                        key={g ?? 'none'}
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleSetGender(stu, g); }}
+                                        className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                          stu.gender === g ? 'bg-emerald-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                        }`}
+                                      >
+                                        {g ? GENDER_LABEL[g] : '未設定'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
+                                  <span className="shrink-0 mr-2">🪟 座席の左右位置:</span>
+                                  <div className="flex gap-1.5">
+                                    {([undefined, 'window', 'corridor'] as (SeatSide | undefined)[]).map(side => (
+                                      <button
+                                        key={side ?? 'none'}
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleUpdateStudentProp(stu, {
+                                            props: { ...stu.props, common: { ...stu.props.common, preferSide: side } }
+                                          });
+                                        }}
+                                        className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                          stu.props.common.preferSide === side ? 'bg-amber-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                        }`}
+                                      >
+                                        {side ? SEAT_SIDE_LABEL[side] : '指定なし'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800 sm:col-span-2 lg:col-span-1">
+                                  <span className="shrink-0 mr-2">👥 隣に希望するクラス:</span>
+                                  <div className="flex gap-1 flex-wrap justify-end">
+                                    {sameGradeClasses(stu).map(cId => {
+                                      const selected = adjWish?.classIds?.includes(cId) || false;
+                                      return (
+                                        <button
+                                          key={cId}
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const cur = adjWish?.classIds || [];
+                                            updateAdjacentWish(stu, {
+                                              classIds: selected ? cur.filter(c => c !== cId) : [...cur, cId],
+                                            });
+                                          }}
+                                          className={`px-2 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                            selected ? 'bg-violet-500 text-white shadow' : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                          }`}
+                                        >
+                                          {cId}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between bg-indigo-900/60 p-2.5 rounded-xl border border-indigo-800">
+                                  <span className="shrink-0 mr-2">👥 隣に希望する性別:</span>
+                                  <div className="flex gap-1.5">
+                                    {([undefined, 'male', 'female'] as (Gender | undefined)[]).map(g => (
+                                      <button
+                                        key={g ?? 'none'}
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); updateAdjacentWish(stu, { gender: g }); }}
+                                        className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                                          adjWish?.gender === g || (!adjWish?.gender && g === undefined)
+                                            ? 'bg-violet-500 text-white shadow'
+                                            : 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900'
+                                        }`}
+                                      >
+                                        {g ? GENDER_LABEL[g] : '指定なし'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -619,7 +901,215 @@ export default function TabStudents({
             </table>
           </div>
         </div>
-      ) : subTab === 'layout' ? (
+      ) : effectiveSubTab === 'gender' ? (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+          <div className="flex flex-col xl:flex-row justify-between xl:items-center border-b pb-4 gap-4">
+            <div>
+              <h3 className="font-extrabold text-lg text-slate-800">{viewLabel} 性別プリセット ({allStudentsList.length}名)</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                ※「隣に希望する性別」の判定に使います。ボタンで個別に設定するか、学籍順シートの「性別」列（男/女）を一括インポートできます。
+              </p>
+              <p className="text-xs font-black mt-1.5 flex gap-3">
+                <span className="text-blue-700">男 {genderCounts.male}名</span>
+                <span className="text-pink-700">女 {genderCounts.female}名</span>
+                <span className="text-slate-500">未設定 {genderCounts.unset}名</span>
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-xl text-xs font-black text-amber-900">
+                <span className="shrink-0">学年補完:</span>
+                {([1, 2, 3] as ScoreGradeYear[]).map(y => (
+                  <label
+                    key={y}
+                    className={`flex items-center gap-1 px-2 py-1 rounded-lg cursor-pointer transition ${
+                      scoreGradeYear === y ? 'bg-amber-500 text-white shadow-sm' : 'bg-white text-amber-800 hover:bg-amber-100'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="genderGradeYear"
+                      checked={scoreGradeYear === y}
+                      onChange={() => setScoreGradeYear(y)}
+                      className="sr-only"
+                    />
+                    <span>{y}年</span>
+                  </label>
+                ))}
+              </div>
+              <label className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-4 py-2 rounded-xl text-xs cursor-pointer shadow transition shrink-0">
+                📂 学籍順Excelから性別をインポート（複数可）
+                <input
+                  type="file"
+                  accept=".xlsx,.xlsm,.xls"
+                  multiple
+                  onChange={handleGenderFileUpload}
+                  className="hidden"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => handleBulkGender('male')}
+                className="px-3 py-2 rounded-xl text-xs font-black bg-blue-100 text-blue-800 hover:bg-blue-200 cursor-pointer"
+              >
+                全員を男に
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBulkGender('female')}
+                className="px-3 py-2 rounded-xl text-xs font-black bg-pink-100 text-pink-800 hover:bg-pink-200 cursor-pointer"
+              >
+                全員を女に
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBulkGender(undefined)}
+                className="px-3 py-2 rounded-xl text-xs font-black bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
+              >
+                全員を未設定に
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2">
+            {allStudentsList.map(stu => (
+              <div
+                key={studentRowKey(stu)}
+                className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2"
+              >
+                <span className="font-mono font-extrabold text-sm text-slate-700">
+                  {activeCustom ? `${stu.classId}-${stu.id}` : `${stu.id}番`}
+                  <span className="ml-2 font-sans text-[11px] text-slate-500 font-bold">
+                    {stu.name.replace(/ \(未登録\)$/, '')}
+                  </span>
+                </span>
+                <div className="flex gap-1">
+                  {([undefined, 'male', 'female'] as (Gender | undefined)[]).map(g => (
+                    <button
+                      key={g ?? 'none'}
+                      type="button"
+                      onClick={() => handleSetGender(stu, g)}
+                      className={`px-2.5 py-1 rounded font-black text-xs transition cursor-pointer ${
+                        stu.gender === g
+                          ? g === 'male' ? 'bg-blue-500 text-white shadow'
+                            : g === 'female' ? 'bg-pink-500 text-white shadow'
+                            : 'bg-slate-500 text-white shadow'
+                          : 'bg-white text-slate-500 border border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {g ? GENDER_LABEL[g] : '—'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : effectiveSubTab === 'custom' ? (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+          <div className="border-b pb-4">
+            <h3 className="font-extrabold text-lg text-slate-800">特別クラス（特別割など）の管理</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              複数クラスの生徒から編成した授業用クラスを登録できます。登録すると上の「対象クラス」と「② 条件＆数式設定」で選べます。
+              席の関数は 2変数 f(m, n)（m=元クラス番号, n=出席番号）で、全メンバーが単射になるよう自動検証されます。
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {customClasses.length === 0 && (
+              <div className="p-6 text-center text-slate-400 font-bold bg-slate-50 rounded-xl border border-dashed border-slate-300 text-sm">
+                特別クラスはまだありません。下のフォームから作成してください。
+              </div>
+            )}
+            {customClasses.map(c => {
+              const perClass = getCustomClassClassIds(c).map(cid => `${cid}: ${c.members.filter(m => m.classId === cid).length}名`);
+              return (
+                <div
+                  key={c.id}
+                  className={`p-4 rounded-xl border flex flex-col md:flex-row md:items-center justify-between gap-3 ${
+                    selectedCustomClassId === c.id ? 'border-emerald-400 bg-emerald-50/50' : 'border-slate-300 bg-white'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="font-extrabold text-slate-800">
+                      {c.label} <span className="text-xs text-slate-500 font-bold">（{c.members.length}名）</span>
+                    </div>
+                    <div className="text-xs text-slate-500 font-bold mt-0.5">内訳: {perClass.join(' / ')}</div>
+                    <div className="text-[11px] text-slate-400 font-mono mt-1 break-all">
+                      {c.members.map(memberToFourDigit).join(', ')}
+                    </div>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => { onSelectCustomClass(c.id); setSubTab('list'); }}
+                      className="px-3 py-2 rounded-xl text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer"
+                    >
+                      このクラスを選択
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleEditCustomClass(c)}
+                      className="px-3 py-2 rounded-xl text-xs font-black bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
+                    >
+                      ✏️ 編集
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteCustomClass(c)}
+                      className="px-3 py-2 rounded-xl text-xs font-black text-rose-600 hover:bg-rose-50 cursor-pointer"
+                    >
+                      🗑️ 削除
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-slate-50 p-5 rounded-2xl border border-slate-300 space-y-3">
+            <h4 className="font-extrabold text-sm text-slate-800">
+              {editingCustomId ? '✏️ 特別クラスを編集' : '＋ 特別クラスを新規作成'}
+            </h4>
+            <input
+              type="text"
+              value={customLabelDraft}
+              onChange={(e) => setCustomLabelDraft(e.target.value)}
+              placeholder="クラス名（例: 2年 特別割（3グループ））"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-bold bg-white"
+            />
+            <textarea
+              value={customMembersDraft}
+              onChange={(e) => setCustomMembersDraft(e.target.value)}
+              rows={4}
+              placeholder="メンバーの4桁出席番号をカンマ・空白・改行区切りで入力（例: 2303, 2326, 2402, 2404 ...）"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono bg-white"
+            />
+            <p className="text-[11px] text-slate-500 font-bold">
+              ※4桁=学年+組+出席番号（2403 = 2年4組3番）。「保存」ボタンを押したときに認識されます。
+              {customMembersDraft.trim() && ` 現在の入力: ${parseMemberList(customMembersDraft).members.length}名を認識`}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleSaveCustomClass}
+                className="px-4 py-2 rounded-xl text-xs font-black bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer"
+              >
+                {editingCustomId ? '変更を保存' : '作成'}
+              </button>
+              {(editingCustomId || customLabelDraft || customMembersDraft) && (
+                <button
+                  type="button"
+                  onClick={resetCustomEditor}
+                  className="px-4 py-2 rounded-xl text-xs font-black bg-slate-200 text-slate-700 hover:bg-slate-300 cursor-pointer"
+                >
+                  キャンセル
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : effectiveSubTab === 'layout' ? (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="border-b pb-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
             <div>
@@ -668,8 +1158,12 @@ export default function TabStudents({
       ) : (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="border-b pb-4">
-            <h3 className="font-extrabold text-lg text-slate-800">{currentClass} 関連のアーカイブ保存履歴</h3>
-            <p className="text-xs text-slate-500 mt-0.5">※単一クラス・合同授業にかかわらず、このクラスが含まれている保存データがすべて表示されます。</p>
+            <h3 className="font-extrabold text-lg text-slate-800">{viewLabel} 関連のアーカイブ保存履歴</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {activeCustom
+                ? '※この特別クラスで保存した座席表が表示されます。'
+                : '※単一クラス・合同授業にかかわらず、このクラスが含まれている保存データがすべて表示されます。'}
+            </p>
           </div>
 
           {selectedArchive ? (
@@ -734,7 +1228,7 @@ export default function TabStudents({
             <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
               {relevantArchives.length === 0 ? (
                 <div className="p-12 text-center text-slate-400 font-bold bg-slate-50 rounded-xl border border-dashed border-slate-300">
-                  まだ {currentClass} 関連の座席表は保存されていません。<br />
+                  まだ {viewLabel} 関連の座席表は保存されていません。<br />
                   「③ 座席表エディタ＆結果」画面の「💾 この配置を履歴に保存する」ボタンから保存してください。
                 </div>
               ) : (
@@ -747,9 +1241,11 @@ export default function TabStudents({
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                          arch.lessonType === 'combined' ? 'bg-indigo-100 text-indigo-800 border border-indigo-300' : 'bg-slate-100 text-slate-700 border border-slate-300'
+                          arch.lessonType === 'combined' ? 'bg-indigo-100 text-indigo-800 border border-indigo-300'
+                            : arch.lessonType === 'custom' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : 'bg-slate-100 text-slate-700 border border-slate-300'
                         }`}>
-                          {arch.lessonType === 'combined' ? '合同授業' : '通常授業'}
+                          {arch.lessonType === 'combined' ? '合同授業' : arch.lessonType === 'custom' ? '特別クラス' : '通常授業'}
                         </span>
                         <span className="font-extrabold text-sm text-slate-800">{arch.title}</span>
                       </div>

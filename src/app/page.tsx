@@ -1,11 +1,15 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Student, SeatNode, SeatingFunction, ClassLayoutTemplate, ClassId, SeatingArchive, getMaxStudents } from '@/types';
+import {
+  Student, SeatNode, SeatingFunction, ClassLayoutTemplate, ClassId, SeatingArchive, CustomClass,
+  getMaxStudents, getCustomClassClassIds, createDefaultSpecialClass,
+} from '@/types';
 import TabStudents from '@/components/tab-students';
 import TabFormula from '@/components/tab-formula';
 import TabEditor from '@/components/tab-editor';
 import { generateOptimizedSeatingChart } from '@/lib/seator-algorithm';
+import { verifyInjectiveOnDomain } from '@/lib/math-engine';
 
 const LAYOUT_STORAGE_KEY = 'seating_app_layouts_v5';
 const SHARED_AC_STORAGE_KEY = 'seating_app_shared_ac_v5';
@@ -13,6 +17,7 @@ const STUDENTS_STORAGE_KEY = 'seating_app_students_v5';
 const ABSENTEES_STORAGE_KEY = 'seating_app_absentees_v5';
 const CLASS_STORAGE_KEY = 'seating_app_class_v5';
 const ARCHIVES_STORAGE_KEY = 'seating_app_archives_v5';
+const CUSTOM_CLASSES_STORAGE_KEY = 'seating_app_custom_classes_v5';
 
 const DEFAULT_SHARED_AC: number[] = [19, 20, 21, 22, 25, 26, 27, 28];
 
@@ -38,6 +43,11 @@ export default function Home() {
   const [currentFunc, setCurrentFunc] = useState<SeatingFunction | undefined>(undefined);
   const [isCombinedMode, setIsCombinedMode] = useState<boolean>(false);
   const [targetClassesList, setTargetClassesList] = useState<ClassId[]>(['2-1']);
+  const [customClasses, setCustomClasses] = useState<CustomClass[]>([]);
+  /** データ管理・数式設定で選択中の特別クラス（null=通常クラス） */
+  const [selectedCustomClassId, setSelectedCustomClassId] = useState<string | null>(null);
+  /** 現在の座席表の生成元特別クラス */
+  const [activeCustomClassId, setActiveCustomClassId] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState<boolean>(false);
 
   useEffect(() => {
@@ -57,6 +67,13 @@ export default function Home() {
     if (savedAbsentees) try { setAbsenteeIds(JSON.parse(savedAbsentees)); } catch (e) { console.error(e); }
     if (savedArchives) try { setArchives(JSON.parse(savedArchives)); } catch (e) { console.error(e); }
     if (savedClass) setCurrentClass(savedClass as ClassId);
+    const savedCustom = localStorage.getItem(CUSTOM_CLASSES_STORAGE_KEY);
+    if (savedCustom === null) {
+      // 初回のみ、2年 特別割（4グループ）39名を自動作成
+      setCustomClasses([createDefaultSpecialClass()]);
+    } else {
+      try { setCustomClasses(JSON.parse(savedCustom)); } catch (e) { console.error(e); }
+    }
     setIsLoaded(true);
   }, []);
 
@@ -66,28 +83,48 @@ export default function Home() {
   useEffect(() => { if (isLoaded) localStorage.setItem(SHARED_AC_STORAGE_KEY, JSON.stringify(sharedAcSeatIndices)); }, [sharedAcSeatIndices, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(CLASS_STORAGE_KEY, currentClass); }, [currentClass, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(ARCHIVES_STORAGE_KEY, JSON.stringify(archives)); }, [archives, isLoaded]);
+  useEffect(() => { if (isLoaded) localStorage.setItem(CUSTOM_CLASSES_STORAGE_KEY, JSON.stringify(customClasses)); }, [customClasses, isLoaded]);
 
   const handleToggleAbsentee = (classId: ClassId, id: number) => {
     const key = `${classId}-${id}`;
     setAbsenteeIds(prev => prev.includes(key) ? prev.filter(x => x !== key) : [...prev, key]);
   };
 
-  const handleGenerate = (func: SeatingFunction, isCombined: boolean, targetClasses: ClassId[]) => {
+  const makeStubStudent = (classId: ClassId, id: number): Student => ({
+    id,
+    classId,
+    name: `${classId} ${id}番`,
+    defaultPref: 2,
+    score: 0,
+    props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} },
+  });
+
+  const handleGenerate = (
+    func: SeatingFunction,
+    isCombined: boolean,
+    targetClasses: ClassId[],
+    customClassId?: string
+  ) => {
+    const custom = customClassId ? customClasses.find(c => c.id === customClassId) : undefined;
+    const isCustom = !!custom;
+    const effectiveCombined = isCustom ? false : isCombined;
+
     setCurrentFunc(func);
-    setIsCombinedMode(isCombined);
-    setTargetClassesList(targetClasses);
-    const numClasses = isCombined ? targetClasses.length : 1;
-    
-    const layoutCols = isCombined ? 8 : 6;
-    const layoutRows = isCombined ? (numClasses * 5 + 1) : 7;
+    setIsCombinedMode(effectiveCombined);
+    setActiveCustomClassId(custom ? custom.id : null);
+    setTargetClassesList(custom ? getCustomClassClassIds(custom) : targetClasses);
+    const numClasses = effectiveCombined ? targetClasses.length : 1;
+
+    const layoutCols = effectiveCombined ? 8 : 6;
+    const layoutRows = effectiveCombined ? (numClasses * 5 + 1) : 7;
     setCols(layoutCols);
 
     const baseClassId = targetClasses[0] || currentClass;
     const savedLayout = layouts[baseClassId];
-    const activeDisabledIndices = isCombined ? [] : (savedLayout?.disabledSeatIndices || []);
+    const activeDisabledIndices = (effectiveCombined || isCustom) ? [] : (savedLayout?.disabledSeatIndices || []);
 
     const layout: ClassLayoutTemplate = {
-      classLabel: isCombined ? `${targetClasses.join('・')} 合同` : currentClass,
+      classLabel: custom ? custom.label : effectiveCombined ? `${targetClasses.join('・')} 合同` : currentClass,
       cols: layoutCols,
       rows: layoutRows,
       acSeatIndices: sharedAcSeatIndices,
@@ -95,47 +132,54 @@ export default function Home() {
     };
 
     const targetStudents: Student[] = [];
-    const classesToProcess = isCombined ? targetClasses : [currentClass];
+    const classesToProcess = custom
+      ? getCustomClassClassIds(custom)
+      : effectiveCombined ? targetClasses : [currentClass];
 
-    for (const cId of classesToProcess) {
-      const maxN = getMaxStudents(cId);
-      for (let id = 1; id <= maxN; id++) {
-        const existing = students.find(s => s.classId === cId && s.id === id);
-        if (existing) targetStudents.push(existing);
-        else {
-          targetStudents.push({
-            id,
-            classId: cId,
-            name: `${cId} ${id}番`,
-            defaultPref: 2,
-            score: 0,
-            props: { common: { customPairs: [], separateFrom: [] }, whenType1: {}, whenType2: {} }
-          });
+    if (custom) {
+      for (const m of custom.members) {
+        targetStudents.push(students.find(s => s.classId === m.classId && s.id === m.id) || makeStubStudent(m.classId, m.id));
+      }
+    } else {
+      for (const cId of classesToProcess) {
+        const maxN = getMaxStudents(cId);
+        for (let id = 1; id <= maxN; id++) {
+          targetStudents.push(students.find(s => s.classId === cId && s.id === id) || makeStubStudent(cId, id));
         }
       }
     }
 
+    // 実際に着席する生徒（欠席者を除く）の (m, n) で関数が単射か再検証
+    const seated = targetStudents.filter(s => !absenteeIds.includes(`${s.classId}-${s.id}`));
+    const domain = seated.map(s => ({ m: Number(s.classId.split('-')[1]) || 1, n: s.id }));
+    if (!verifyInjectiveOnDomain(func.evaluate, domain)) {
+      alert('この関数は着席する生徒の間で値が重複します。「関数を再生成」してからもう一度実行してください。');
+      return;
+    }
+
     // 対象クラスを含む最新アーカイブを非重複参照に使う（id=保存時刻の降順）
-    const lessonType = isCombined ? 'combined' : 'normal';
+    const lessonType: SeatingArchive['lessonType'] = custom ? 'custom' : effectiveCombined ? 'combined' : 'normal';
     const sortedArchives = [...archives].sort((a, b) => Number(b.id) - Number(a.id));
-    const newestArchive =
-      sortedArchives.find(a =>
-        a.lessonType === lessonType &&
-        classesToProcess.every(c => a.targetClasses.includes(c))
-      ) ||
-      sortedArchives.find(a =>
-        a.lessonType === lessonType &&
-        classesToProcess.some(c => a.targetClasses.includes(c))
-      ) ||
-      sortedArchives.find(a =>
-        classesToProcess.every(c => a.targetClasses.includes(c))
-      );
+    const newestArchive = custom
+      ? sortedArchives.find(a => a.lessonType === 'custom' && a.customClassId === custom.id)
+      : sortedArchives.find(a =>
+          a.lessonType === lessonType &&
+          classesToProcess.every(c => a.targetClasses.includes(c))
+        ) ||
+        sortedArchives.find(a =>
+          a.lessonType === lessonType &&
+          classesToProcess.some(c => a.targetClasses.includes(c))
+        ) ||
+        sortedArchives.find(a =>
+          a.lessonType !== 'custom' &&
+          classesToProcess.every(c => a.targetClasses.includes(c))
+        );
 
     const generatedSeats = generateOptimizedSeatingChart(
       targetStudents,
       absenteeIds,
       layout,
-      isCombined,
+      effectiveCombined,
       func,
       newestArchive?.seats
     );
@@ -144,21 +188,30 @@ export default function Home() {
   };
 
   const handleSaveArchive = () => {
-    const title = isCombinedMode
-      ? `${targetClassesList.join('・')} 合同座席表 (${new Date().toLocaleDateString('ja-JP')})`
-      : `${currentClass} 通常座席表 (${new Date().toLocaleDateString('ja-JP')})`;
+    const activeCustom = activeCustomClassId ? customClasses.find(c => c.id === activeCustomClassId) : undefined;
+    const today = new Date().toLocaleDateString('ja-JP');
+    const title = activeCustom
+      ? `${activeCustom.label} 座席表 (${today})`
+      : isCombinedMode
+        ? `${targetClassesList.join('・')} 合同座席表 (${today})`
+        : `${currentClass} 通常座席表 (${today})`;
 
-    const archiveTargetClasses = isCombinedMode ? targetClassesList : [currentClass];
-    // 対象クラスに属する欠席者だけをアーカイブに保存
+    const archiveTargetClasses = activeCustom
+      ? getCustomClassClassIds(activeCustom)
+      : isCombinedMode ? targetClassesList : [currentClass];
+    // 対象クラス（特別クラスはメンバー）に属する欠席者だけをアーカイブに保存
     const archiveAbsenteeIds = absenteeIds.filter(key =>
-      archiveTargetClasses.some(c => key.startsWith(`${c}-`))
+      activeCustom
+        ? activeCustom.members.some(m => key === `${m.classId}-${m.id}`)
+        : archiveTargetClasses.some(c => key.startsWith(`${c}-`))
     );
 
     const newArchive: SeatingArchive = {
       id: Date.now().toString(),
       title,
       date: new Date().toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
-      lessonType: isCombinedMode ? 'combined' : 'normal',
+      lessonType: activeCustom ? 'custom' : isCombinedMode ? 'combined' : 'normal',
+      customClassId: activeCustom?.id,
       targetClasses: archiveTargetClasses,
       seatingFunctionLatex: currentFunc?.latexString || 'f(n) = 3n + 5',
       seats: seats,
@@ -176,7 +229,16 @@ export default function Home() {
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight">数学 席替え座席表</h1>
         </div>
         <div className="text-sm font-bold bg-slate-800 px-4 py-2 rounded-lg border border-slate-700">
-          選択中: <span className="text-indigo-400 font-mono text-base">{currentClass}</span> ({students.filter(s => s.classId === currentClass).length}名登録)
+          {selectedCustomClassId && customClasses.some(c => c.id === selectedCustomClassId) ? (
+            <>
+              選択中: <span className="text-indigo-400 text-base">{customClasses.find(c => c.id === selectedCustomClassId)?.label}</span>{' '}
+              ({customClasses.find(c => c.id === selectedCustomClassId)?.members.length}名)
+            </>
+          ) : (
+            <>
+              選択中: <span className="text-indigo-400 font-mono text-base">{currentClass}</span> ({students.filter(s => s.classId === currentClass).length}名登録)
+            </>
+          )}
         </div>
       </header>
 
@@ -216,6 +278,10 @@ export default function Home() {
               onUpdateStudents={setStudents}
               currentClass={currentClass}
               onChangeClass={setCurrentClass}
+              customClasses={customClasses}
+              onUpdateCustomClasses={setCustomClasses}
+              selectedCustomClassId={selectedCustomClassId}
+              onSelectCustomClass={setSelectedCustomClassId}
               layouts={layouts}
               onUpdateLayouts={setLayouts}
               sharedAcSeatIndices={sharedAcSeatIndices}
@@ -227,6 +293,8 @@ export default function Home() {
           {activeTab === 'formula' && (
             <TabFormula
               currentClass={currentClass}
+              customClasses={customClasses}
+              selectedCustomClassId={selectedCustomClassId}
               students={students}
               absenteeIds={absenteeIds}
               onToggleAbsentee={handleToggleAbsentee}

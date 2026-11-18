@@ -30,22 +30,39 @@ function fmtTerm(coeff: number, varName: string): string {
   return `${sign} ${val === 1 ? '' : val}${varName}`;
 }
 
+/** 関数の定義域: クラス番号 m と出席番号 n の組 */
+export type FunctionDomain = { m: number; n: number }[];
+
+export function buildDomainFromClasses(targetClasses: ClassId[]): FunctionDomain {
+  const domain: FunctionDomain = [];
+  for (const cId of targetClasses) {
+    const classNum = Number(cId.split('-')[1]) || 1;
+    const maxN = getMaxStudents(cId);
+    for (let n = 1; n <= maxN; n++) domain.push({ m: classNum, n });
+  }
+  return domain;
+}
+
+/** 定義域のすべての (m, n) で値が整数・|値|≤9999・互いに異なる（単射）かを検証 */
+export function verifyInjectiveOnDomain(
+  func: (m: number, n: number) => number,
+  domain: FunctionDomain
+): boolean {
+  const seen = new Set<number>();
+  for (const { m, n } of domain) {
+    const val = func(m, n);
+    if (!Number.isInteger(val) || Math.abs(val) > 9999 || seen.has(val)) return false;
+    seen.add(val);
+  }
+  return true;
+}
+
 /** 単射性チェック */
 export function verifyInjectiveMapping(
   func: (m: number, n: number) => number,
   targetClasses: ClassId[]
 ): boolean {
-  const seen = new Set<number>();
-  for (const cId of targetClasses) {
-    const classNum = Number(cId.split('-')[1]) || 1;
-    const maxN = getMaxStudents(cId);
-    for (let n = 1; n <= maxN; n++) {
-      const val = func(classNum, n);
-      if (!Number.isInteger(val) || Math.abs(val) > 9999 || seen.has(val)) return false;
-      seen.add(val);
-    }
-  }
-  return true;
+  return verifyInjectiveOnDomain(func, buildDomainFromClasses(targetClasses));
 }
 
 /**
@@ -53,6 +70,18 @@ export function verifyInjectiveMapping(
  */
 export async function generateAICheckedSeatingFunction(
   targetClasses: ClassId[],
+  isCombined: boolean,
+  difficulty: 'easy' | 'medium' | 'hard'
+): Promise<SeatingFunction> {
+  return generateInjectiveFunctionForDomain(buildDomainFromClasses(targetClasses), isCombined, difficulty);
+}
+
+/**
+ * 任意の定義域 {(m, n)} に対して単射になる座席関数を生成する。
+ * isCombined=true のとき 2変数関数 f(m, n)（特別クラス・合同授業向け）、false のとき f(n)。
+ */
+export async function generateInjectiveFunctionForDomain(
+  domain: FunctionDomain,
   isCombined: boolean,
   difficulty: 'easy' | 'medium' | 'hard'
 ): Promise<SeatingFunction> {
@@ -160,7 +189,7 @@ export async function generateAICheckedSeatingFunction(
       }
     }
 
-    if (verifyInjectiveMapping(evalFunc, targetClasses)) {
+    if (verifyInjectiveOnDomain(evalFunc, domain)) {
       return { id, difficulty, title, latexString, evaluate: evalFunc };
     }
   }
