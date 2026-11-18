@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Student, SeatNode, SeatingFunction, ClassLayoutTemplate, ClassId, SeatingArchive, CustomClass,
-  getMaxStudents, getCustomClassClassIds, createDefaultSpecialClass,
+  getMaxStudents, getCustomClassClassIds, getCustomBaseClassId, createDefaultSpecialClass,
 } from '@/types';
 import TabStudents from '@/components/tab-students';
 import TabFormula from '@/components/tab-formula';
@@ -18,6 +18,7 @@ const ABSENTEES_STORAGE_KEY = 'seating_app_absentees_v5';
 const CLASS_STORAGE_KEY = 'seating_app_class_v5';
 const ARCHIVES_STORAGE_KEY = 'seating_app_archives_v5';
 const CUSTOM_CLASSES_STORAGE_KEY = 'seating_app_custom_classes_v5';
+const SELECTED_CUSTOM_STORAGE_KEY = 'seating_app_selected_custom_v5';
 
 const DEFAULT_SHARED_AC: number[] = [19, 20, 21, 22, 25, 26, 27, 28];
 
@@ -68,11 +69,18 @@ export default function Home() {
     if (savedArchives) try { setArchives(JSON.parse(savedArchives)); } catch (e) { console.error(e); }
     if (savedClass) setCurrentClass(savedClass as ClassId);
     const savedCustom = localStorage.getItem(CUSTOM_CLASSES_STORAGE_KEY);
+    let loadedCustomClasses: CustomClass[] = [];
     if (savedCustom === null) {
       // 初回のみ、2年 特別割（4グループ）39名を自動作成
-      setCustomClasses([createDefaultSpecialClass()]);
+      loadedCustomClasses = [createDefaultSpecialClass()];
     } else {
-      try { setCustomClasses(JSON.parse(savedCustom)); } catch (e) { console.error(e); }
+      try { loadedCustomClasses = JSON.parse(savedCustom); } catch (e) { console.error(e); }
+    }
+    setCustomClasses(loadedCustomClasses);
+    // 最後に開いていたクラスが特別クラスなら、通常クラスと同様に復元する
+    const savedSelectedCustom = localStorage.getItem(SELECTED_CUSTOM_STORAGE_KEY);
+    if (savedSelectedCustom && loadedCustomClasses.some(c => c.id === savedSelectedCustom)) {
+      setSelectedCustomClassId(savedSelectedCustom);
     }
     setIsLoaded(true);
   }, []);
@@ -84,6 +92,11 @@ export default function Home() {
   useEffect(() => { if (isLoaded) localStorage.setItem(CLASS_STORAGE_KEY, currentClass); }, [currentClass, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(ARCHIVES_STORAGE_KEY, JSON.stringify(archives)); }, [archives, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(CUSTOM_CLASSES_STORAGE_KEY, JSON.stringify(customClasses)); }, [customClasses, isLoaded]);
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (selectedCustomClassId) localStorage.setItem(SELECTED_CUSTOM_STORAGE_KEY, selectedCustomClassId);
+    else localStorage.removeItem(SELECTED_CUSTOM_STORAGE_KEY);
+  }, [selectedCustomClassId, isLoaded]);
 
   const handleToggleAbsentee = (classId: ClassId, id: number) => {
     const key = `${classId}-${id}`;
@@ -119,9 +132,10 @@ export default function Home() {
     const layoutRows = effectiveCombined ? (numClasses * 5 + 1) : 7;
     setCols(layoutCols);
 
-    const baseClassId = targetClasses[0] || currentClass;
+    // 特別クラスは、メンバー数が最も多い元クラス（特別割4なら2-4）のデフォルト座席を引き継ぐ
+    const baseClassId = custom ? getCustomBaseClassId(custom) : (targetClasses[0] || currentClass);
     const savedLayout = layouts[baseClassId];
-    const activeDisabledIndices = (effectiveCombined || isCustom) ? [] : (savedLayout?.disabledSeatIndices || []);
+    const activeDisabledIndices = effectiveCombined ? [] : (savedLayout?.disabledSeatIndices || []);
 
     const layout: ClassLayoutTemplate = {
       classLabel: custom ? custom.label : effectiveCombined ? `${targetClasses.join('・')} 合同` : currentClass,

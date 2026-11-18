@@ -117,6 +117,19 @@ export function getCustomClassClassIds(c: CustomClass): ClassId[] {
   return Array.from(new Set(c.members.map(m => m.classId))).sort();
 }
 
+/** 特別クラスのデフォルト座席の継承元: メンバーが最も多い元クラス（同数なら番号の小さい組） */
+export function getCustomBaseClassId(c: CustomClass): ClassId {
+  const counts = new Map<ClassId, number>();
+  for (const m of c.members) counts.set(m.classId, (counts.get(m.classId) || 0) + 1);
+  let best: ClassId = c.members[0]?.classId ?? '2-4';
+  let bestCount = -1;
+  for (const cid of [...counts.keys()].sort()) {
+    const n = counts.get(cid)!;
+    if (n > bestCount) { best = cid; bestCount = n; }
+  }
+  return best;
+}
+
 /** 2年 特別割（資料の「4」グループ）: 2-3×2名 / 2-4×27名 / 2-5×10名 = 39名 */
 export const SPECIAL_2_GROUP4_IDS: number[] = [
   2303, 2326,

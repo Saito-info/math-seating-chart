@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import {
   Student, ClassId, ALL_CLASSES, ClassLayoutTemplate, getMaxStudents, SeatingArchive,
   CustomClass, Gender, GENDER_LABEL, SeatSide, SEAT_SIDE_LABEL, AdjacentWish,
-  parseMemberList, memberToFourDigit, getCustomClassClassIds, parseFourDigitStudentId,
+  parseMemberList, memberToFourDigit, getCustomClassClassIds, parseFourDigitStudentId, getCustomBaseClassId,
 } from '@/types';
 import {
   parseExcelData, parseExcelScoreFiles, parseGenderFromExcelFiles, ImportMode, ScoreGradeYear,
@@ -115,7 +115,7 @@ export default function TabStudents({
 
   const activeCustom = customClasses.find(c => c.id === selectedCustomClassId);
   const viewLabel = activeCustom ? activeCustom.label : currentClass;
-  const effectiveSubTab = activeCustom && subTab === 'layout' ? 'list' : subTab;
+  const effectiveSubTab = subTab;
 
   const makeStub = (classId: ClassId, id: number): Student => ({
     id,
@@ -197,8 +197,10 @@ export default function TabStudents({
     unset: allStudentsList.filter(s => !s.gender).length,
   };
 
-  const currentLayout: ClassLayoutTemplate = layouts[currentClass] || {
-    classLabel: currentClass,
+  // 特別クラスのデフォルト座席は、メンバーが最も多い元クラス（特別割4なら2-4）を引き継ぐ
+  const layoutClass: ClassId = activeCustom ? getCustomBaseClassId(activeCustom) : currentClass;
+  const currentLayout: ClassLayoutTemplate = layouts[layoutClass] || {
+    classLabel: layoutClass,
     cols: 6,
     rows: 7,
     acSeatIndices: sharedAcSeatIndices,
@@ -395,7 +397,7 @@ export default function TabStudents({
       onUpdateSharedAc(nextAC);
       onUpdateLayouts({
         ...layouts,
-        [currentClass]: { ...currentLayout, acSeatIndices: nextAC, disabledSeatIndices: nextDisabled },
+        [layoutClass]: { ...currentLayout, acSeatIndices: nextAC, disabledSeatIndices: nextDisabled },
       });
       return;
     } else {
@@ -405,7 +407,7 @@ export default function TabStudents({
 
     onUpdateLayouts({
       ...layouts,
-      [currentClass]: { ...currentLayout, acSeatIndices: nextAC, disabledSeatIndices: nextDisabled },
+      [layoutClass]: { ...currentLayout, acSeatIndices: nextAC, disabledSeatIndices: nextDisabled },
     });
   };
 
@@ -566,15 +568,13 @@ export default function TabStudents({
             >
               🏷️ 特別クラス
             </button>
-            {!activeCustom && (
-              <button
-                type="button"
-                onClick={() => { setSubTab('layout'); setSelectedArchive(null); }}
-                className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'layout' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
-              >
-                🏫 デフォルト座席設定
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => { setSubTab('layout'); setSelectedArchive(null); }}
+              className={`px-3.5 py-2 rounded-lg transition cursor-pointer ${effectiveSubTab === 'layout' ? 'bg-white text-indigo-600 shadow-2xs' : 'text-slate-600 hover:bg-slate-200/60'}`}
+            >
+              🏫 デフォルト座席設定
+            </button>
             <button
               type="button"
               onClick={() => setSubTab('archive')}
@@ -1171,7 +1171,14 @@ export default function TabStudents({
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
           <div className="border-b pb-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
             <div>
-              <h3 className="font-extrabold text-lg text-slate-800">{currentClass} デフォルト教室レイアウト設定</h3>
+              <h3 className="font-extrabold text-lg text-slate-800">
+                {activeCustom ? `${activeCustom.label}（${layoutClass} のレイアウトを引き継ぎ）` : currentClass} デフォルト教室レイアウト設定
+              </h3>
+              {activeCustom && (
+                <p className="text-xs font-bold text-emerald-700 mt-0.5">
+                  ※この画面の無効席の設定は {layoutClass} と共通です（{layoutClass} を選んで変更しても同じ内容が反映されます）。
+                </p>
+              )}
               <p className="text-xs text-slate-500 mt-0.5">
                 ※❄️エアコン席は<strong className="text-cyan-700">全教室共通</strong>です。無効席のみクラスごとに設定できます。変更は即座に保存されます。
               </p>
